@@ -1,27 +1,31 @@
 import os
 import requests
 import asyncio
+from functools import partial
 from pymongo import MongoClient
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes, ConversationHandler
+    CallbackQueryHandler, ContextTypes, ConversationHandler, filters
 )
 from telegram.constants import ParseMode
 
-# ================== 1. الإعدادات والربط ==================
-# تأكد من إضافة هذه القيم في Environment Variables في Koyeb
-MONGO_URL = os.getenv("MONGO_URL")
+# ================== الإعدادات ==================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_PASSWORD = "1460" 
+MONGO_URL = os.getenv("MONGO_URL")
+ADMIN_PASSWORD = "1460"
 
-# الاتصال بقاعدة البيانات (لتخزين الأقسام الإضافية)
+if not BOT_TOKEN or not MONGO_URL:
+    raise RuntimeError("BOT_TOKEN أو MONGO_URL غير موجود")
+
 client = MongoClient(MONGO_URL)
 db = client.shoof_play_db
 dyn_col = db.dynamic_sections
 
+
+# ================== الأقسام (19 ثابتة + ديناميكية) ==================
 def get_all_mux():
-    """كافة الأقسام الـ 19 الثابتة التي زودتني بها"""
     mux_sections = {
         "1": {"id": "A058bf43-4c80-49d6-b902-b0fd00cfff18", "secret": "+q5bNYmCQyhii+HdXN8RB4jadh704TVtZVp2qqtlwAmNhX5mhibj/0Yg/UALbysMjVfUxO6qTBA"},
         "2": {"id": "664f5ab9-4b93-4a85-9cdc-39bed76857dd", "secret": "RZG8KZLJkd/+30Idcq26otBmje36qrQTWx3QWdqUErAjhonVPsCIYVZnFq5gLo/nGzAk5GWz5gl"},
@@ -41,181 +45,152 @@ def get_all_mux():
         "16": {"id": "3bd99e7d-5805-45e7-90ba-cf7395bea2ec", "secret": "2cTSi3G5LkqJ9/TLMXezMZ6Q+AZNBCpgKRTe/PLH3lyFtijhpGJJ34sEenktHll7anjDCszqopT"},
         "17": {"id": "2f230bba-92a3-425a-a235-ba792a6cda4e", "secret": "LyoGF6sbby1ajGKvCQKak11/7T9jPNKWt8sF4uTCMppjisoq8lIAHwQalyaNcnaAepcLNgwPoQ1"},
         "18": {"id": "ba238656-8a32-40ea-b8ea-edaabd17ea4e", "secret": "hjJh8oSOZ0nznssaR9iioEAQ3gHiq9aQEUUbw8+PrqSRkr9VE69fhC6wlqa0gYU1asz7JNo/c32"},
-        "19": {"id": "5414c527-5e37-4229-b761-0a7f4343b6d8", "secret": "zOWmBPj7pM3vj4lTy9NzFj//qFhbRaJFqqarfDsSJ55hTo+mP0XeR07mAS8uC3OcDbGzdcRFE3S"}
+        "19": {"id": "5414c527-5e37-4229-b761-0a7f4343b6d8", "secret": "zOWmBPj7pM3vj4lTy9NzFj//qFhbRaJFqqarfDsSJ55hTo+mP0XeR07mAS8uC3OcDbGzdcRFE3S"},
     }
-    # جلب أي أقسام إضافية من قاعدة البيانات
+
     for s in dyn_col.find().sort("section_id", 1):
         mux_sections[str(s["section_id"])] = {"id": s["id"], "secret": s["secret"]}
+
     return mux_sections
 
-# حالات المحادثة
-(MENU, AUTH_ADMIN, ADMIN_HOME, SELECT_UP, NAMING, LINKING, 
- SELECT_REV, SELECT_ADM_DEL, ADD_SEC_ID, ADD_SEC_SECRET) = range(10)
 
-# ================== 2. نظام التنبيهات الذكي ==================
-async def check_video_status(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    asset_id, creds, chat_id, movie_name = job.data['asset_id'], job.data['creds'], job.data['chat_id'], job.data['movie_name']
-    try:
-        r = requests.get(f"https://api.mux.com/video/v1/assets/{asset_id}", auth=(creds["id"], creds["secret"]), timeout=10)
-        if r.status_code == 200 and r.json()["data"]["status"] == "ready":
-            text = f"🌟 <b>خبر سعيد من Shoof Play</b>\n\n🎬 الفيلم: <b>{movie_name}</b>\n✅ الحالة: <b>جاهز للمشاهدة الآن</b>"
-            await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.HTML)
-            job.schedule_removal()
-    except: pass
+# ================== الحالات ==================
+MENU, AUTH_ADMIN, SELECT_UP, NAMING, LINKING, SELECT_REV, ADMIN_HOME = range(7)
 
-# ================== 3. الدوال الرئيسية والواجهة ==================
 
+# ================== start ==================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("📤 رفع فيلم", callback_data="nav_up"), InlineKeyboardButton("🎬 مراجعة", callback_data="nav_rev")],
-          [InlineKeyboardButton("📊 فحص السعة", callback_data="nav_stats"), InlineKeyboardButton("⚙️ الإدارة", callback_data="nav_adm")]]
-    text = "🎬 <b>لوحة تحكم Shoof Play</b>\nأهلاً بك! الرجاء اختيار عملية من القائمة:"
+    kb = [
+        [InlineKeyboardButton("📤 رفع فيلم", callback_data="nav_up"),
+         InlineKeyboardButton("🎬 مراجعة", callback_data="nav_rev")],
+        [InlineKeyboardButton("📊 فحص السعة", callback_data="nav_stats"),
+         InlineKeyboardButton("⚙️ الإدارة", callback_data="nav_adm")]
+    ]
+
+    text = "🎬 <b>لوحة تحكم Shoof Play</b>\nاختر عملية:"
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+        await update.callback_query.edit_message_text(text, InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
     else:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+        await update.message.reply_text(text, InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+
     return MENU
 
+
+# ================== التنقل ==================
 async def navigate(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer() # حل مشكلة توقف الأزرار
+    q = update.callback_query
+    await q.answer()
     sections = get_all_mux()
-    if q.data == "nav_up":
-        btns = [InlineKeyboardButton(f"القسم {i}", callback_data=f"up_{i}") for i in sections]
-        kb = [btns[i:i+3] for i in range(0, len(btns), 3)]; kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_home")])
-        await q.edit_message_text("📤 اختر القسم للرفع إليه:", reply_markup=InlineKeyboardMarkup(kb)); return SELECT_UP
-    elif q.data == "nav_rev":
-        btns = [InlineKeyboardButton(f"القسم {i}", callback_data=f"rev_{i}") for i in sections]
-        kb = [btns[i:i+3] for i in range(0, len(btns), 3)]; kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_home")])
-        await q.edit_message_text("🎬 اختر القسم للمراجعة:", reply_markup=InlineKeyboardMarkup(kb)); return SELECT_REV
-    elif q.data == "nav_stats":
-        await q.edit_message_text("⏳ جاري فحص سعة أقسام Shoof Play...")
-        report = "📊 <b>تقرير الأقسام المحدث:</b>\n\n"
-        for i, creds in sections.items():
-            try:
-                r = requests.get("https://api.mux.com/video/v1/assets", params={"limit": 1}, auth=(creds["id"], creds["secret"]), timeout=7)
-                count = r.json().get("total_row_count", 0)
-                status = "🔴 ممتلئ" if count >= 98 else "🟢 متاح"
-                report += f"📍 القسم {i}: <b>{count}/100</b> فيلم | {status}\n"
-            except: report += f"📍 القسم {i}: ⚠️ خطأ اتصال\n"
-        kb = [[InlineKeyboardButton("🔙 رجوع", callback_data="back_home")]]
-        await q.edit_message_text(report, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML); return MENU
-    elif q.data == "nav_adm":
-        if context.user_data.get("is_admin"): return await admin_home(update, context)
-        await q.edit_message_text("🔐 أرسل كلمة المرور للدخول للإدارة:"); return AUTH_ADMIN
 
-# ================== 4. نظام الرفع والمراجعة ==================
+    if q.data in ("nav_up", "nav_rev"):
+        prefix = "up_" if q.data == "nav_up" else "rev_"
+        text = "📤 اختر القسم:" if q.data == "nav_up" else "🎬 اختر القسم:"
+        buttons = [InlineKeyboardButton(f"القسم {i}", callback_data=f"{prefix}{i}") for i in sections]
+        kb = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+        kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="back_home")])
+        await q.edit_message_text(text, InlineKeyboardMarkup(kb))
+        return SELECT_UP if q.data == "nav_up" else SELECT_REV
 
+    if q.data == "nav_adm":
+        if context.user_data.get("is_admin"):
+            return await admin_home(update, context)
+        await q.edit_message_text("🔐 أرسل كلمة المرور:")
+        return AUTH_ADMIN
+
+
+# ================== رفع ==================
 async def start_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
     context.user_data["sec"] = update.callback_query.data.split("_")[1]
-    await update.callback_query.edit_message_text("✏️ أرسل <b>اسم الفيلم</b>:"); return NAMING
+    await update.callback_query.answer()
+    await update.callback_query.edit_message_text("✏️ أرسل اسم الفيلم:")
+    return NAMING
+
 
 async def upload_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["name"] = update.message.text
-    await update.message.reply_text("🔗 أرسل <b>رابط الفيديو المباشر</b>:"); return LINKING
+    await update.message.reply_text("🔗 أرسل رابط الفيديو:")
+    return LINKING
+
 
 async def upload_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    sec, movie_name = context.user_data["sec"], context.user_data["name"]
-    creds = get_all_mux().get(sec)
-    r = requests.post("https://api.mux.com/video/v1/assets", 
-                      json={"input": update.message.text, "playback_policy": ["public"], "passthrough": movie_name}, 
-                      auth=(creds["id"], creds["secret"]))
+    sec = context.user_data["sec"]
+    name = context.user_data["name"]
+    creds = get_all_mux()[sec]
+
+    r = requests.post(
+        "https://api.mux.com/video/v1/assets",
+        auth=(creds["id"], creds["secret"]),
+        json={"input": update.message.text, "playback_policy": ["public"], "passthrough": name}
+    )
+
     if r.status_code == 201:
-        data = r.json()["data"]; p_id = data["playback_ids"][0]["id"]
-        text = f"✅ <b>تم الرفع بنجاح لـ Shoof Play</b>\n\n🎬 الفيلم: <b>{movie_name}</b>\n📥 Playback ID:\n<code>{p_id}</code>\n\n✨ يمكنك إرسال اسم الفيلم التالي الآن."
-        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-        # تشغيل نظام التنبيه
-        context.job_queue.run_repeating(check_video_status, interval=60, first=30, 
-                                        data={'asset_id': data["id"], 'creds': creds, 'chat_id': update.message.chat_id, 'movie_name': movie_name})
-    else: await update.message.reply_text("❌ فشل الرفع! تأكد من جودة الرابط."); return NAMING
+        p_id = r.json()["data"]["playback_ids"][0]["id"]
+        await update.message.reply_text(f"✅ تم الرفع\n🎬 {name}\n<code>{p_id}</code>", parse_mode=ParseMode.HTML)
+    else:
+        await update.message.reply_text("❌ فشل الرفع")
 
+    return MENU
+
+
+# ================== مراجعة ==================
 async def review_assets(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    sec = q.data.split("_")[1]
-    creds = get_all_mux().get(sec)
-    r = requests.get(f"https://api.mux.com/video/v1/assets?limit=15", auth=(creds["id"], creds["secret"]))
-    assets = r.json().get("data", [])
-    text = f"🎬 <b>أفلام القسم {sec}:</b>\n\n"
-    if not assets: text += "القسم فارغ حالياً."
-    for a in assets:
-        p_id = a.get('playback_ids', [{}])[0].get('id', 'N/A')
-        text += f"• <b>{a.get('passthrough','بدون اسم')}</b>\n└ Playback: <code>{p_id}</code>\n\n"
-    kb = [[InlineKeyboardButton("🔙 رجوع", callback_data="nav_rev")]]
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML); return MENU
+    sec = update.callback_query.data.split("_")[1]
+    await update.callback_query.answer()
+    creds = get_all_mux()[sec]
 
-# ================== 5. قسم الإدارة (حذف وإضافة) ==================
+    r = requests.get("https://api.mux.com/video/v1/assets?limit=10", auth=(creds["id"], creds["secret"]))
+    text = f"🎬 أفلام القسم {sec}\n\n"
 
+    for a in r.json().get("data", []):
+        p = a.get("playback_ids", [])
+        pid = p[0]["id"] if p else "N/A"
+        text += f"{a.get('passthrough','بدون اسم')}\n<code>{pid}</code>\n\n"
+
+    await update.callback_query.edit_message_text(
+        text,
+        InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="back_home")]]),
+        parse_mode=ParseMode.HTML
+    )
+    return MENU
+
+
+# ================== إدارة ==================
 async def admin_auth(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.delete() # حذف الباسورد فوراً للخصوصية
     if update.message.text == ADMIN_PASSWORD:
-        context.user_data["is_admin"] = True; return await admin_home(update, context)
-    await update.message.reply_text("❌ كلمة مرور خاطئة!"); return MENU
+        context.user_data["is_admin"] = True
+        return await admin_home(update, context)
+    await update.message.reply_text("❌ كلمة المرور خاطئة")
+    return MENU
+
 
 async def admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    kb = [[InlineKeyboardButton("🗑 حذف فيلم", callback_data="adm_del_sec")], 
-          [InlineKeyboardButton("➕ إضافة قسم", callback_data="adm_add_sec")], [InlineKeyboardButton("🏠 الرئيسية", callback_data="back_home")]]
-    text = "⚙️ <b>لوحة إدارة Shoof Play</b>"
+    kb = [[InlineKeyboardButton("🏠 الرئيسية", callback_data="back_home")]]
     if update.callback_query:
         await update.callback_query.answer()
-        await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+        await update.callback_query.edit_message_text("⚙️ لوحة الإدارة", InlineKeyboardMarkup(kb))
     else:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML)
+        await update.message.reply_text("⚙️ لوحة الإدارة", InlineKeyboardMarkup(kb))
     return ADMIN_HOME
 
-async def admin_del_select_sec(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer()
-    btns = [InlineKeyboardButton(f"القسم {i}", callback_data=f"adel_{i}") for i in get_all_mux()]
-    kb = [btns[i:i+3] for i in range(0, len(btns), 3)]; kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="nav_adm")])
-    await q.edit_message_text("🗑 اختر القسم للحذف منه:", reply_markup=InlineKeyboardMarkup(kb)); return SELECT_ADM_DEL
 
-async def admin_del_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer(); sec = q.data.split("_")[1]
-    creds = get_all_mux().get(sec)
-    r = requests.get(f"https://api.mux.com/video/v1/assets?limit=15", auth=(creds["id"], creds["secret"]))
-    assets = r.json().get("data", [])
-    text = f"⚙️ <b>إدارة حذف القسم {sec}:</b>"
-    kb = []
-    for a in assets:
-        name = a.get('passthrough','...')
-        kb.append([InlineKeyboardButton(f"🎬 {name}", callback_data="none"), InlineKeyboardButton("🗑", callback_data=f"drop_{sec}_{a['id']}")])
-    kb.append([InlineKeyboardButton("🔙 رجوع", callback_data="adm_del_sec")])
-    await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode=ParseMode.HTML); return ADMIN_HOME
-
-async def delete_asset_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query; await q.answer(); _, sec, asset_id = q.data.split("_")
-    creds = get_all_mux().get(sec)
-    r = requests.delete(f"https://api.mux.com/video/v1/assets/{asset_id}", auth=(creds["id"], creds["secret"]))
-    await q.answer("✅ تم الحذف" if r.status_code == 204 else "❌ خطأ"); return await admin_del_list(update, context)
-
-async def add_sec_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.callback_query.answer()
-    await update.callback_query.edit_message_text("🆕 أرسل Mux Access Token ID:"); return ADD_SEC_ID
-
-async def add_sec_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["new_id"] = update.message.text
-    await update.message.reply_text("🔑 أرسل Mux Secret Key:"); return ADD_SEC_SECRET
-
-async def add_sec_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    dyn_col.insert_one({"section_id": len(get_all_mux()) + 1, "id": context.user_data["new_id"], "secret": update.message.text})
-    await update.message.reply_text("✅ تم تفعيل القسم الجديد بنجاح!"); return await admin_home(update, context)
-
-# ================== 6. تشغيل التطبيق ==================
+# ================== تشغيل ==================
 app = ApplicationBuilder().token(BOT_TOKEN).build()
+
 conv = ConversationHandler(
-    entry_points=[CommandHandler("start", start), CallbackQueryHandler(start, pattern="back_home")],
+    entry_points=[CommandHandler("start", start)],
     states={
-        MENU: [CallbackQueryHandler(navigate, pattern="nav_"), CallbackQueryHandler(delete_asset_action, pattern="drop_")],
-        SELECT_UP: [CallbackQueryHandler(start_upload, pattern="up_")],
+        MENU: [CallbackQueryHandler(navigate, pattern=r"^nav_")],
+        SELECT_UP: [CallbackQueryHandler(start_upload, pattern=r"^up_")],
         NAMING: [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_name)],
         LINKING: [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_video)],
-        SELECT_REV: [CallbackQueryHandler(review_assets, pattern="rev_")],
+        SELECT_REV: [CallbackQueryHandler(review_assets, pattern=r"^rev_")],
         AUTH_ADMIN: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_auth)],
-        ADMIN_HOME: [CallbackQueryHandler(admin_del_select_sec, pattern="adm_del_sec"), CallbackQueryHandler(add_sec_start, pattern="adm_add_sec")],
-        SELECT_ADM_DEL: [CallbackQueryHandler(admin_del_list, pattern="adel_")],
-        ADD_SEC_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_sec_id)],
-        ADD_SEC_SECRET: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_sec_final)],
+        ADMIN_HOME: [],
     },
-    fallbacks=[CommandHandler("start", start)], allow_reentry=True
+    fallbacks=[CallbackQueryHandler(start, pattern=r"^back_home$")],
+    allow_reentry=True
 )
-app.add_handler(conv); app.run_polling()
+
+app.add_handler(conv)
+app.run_polling()
