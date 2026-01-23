@@ -3,6 +3,7 @@ import asyncio
 import aiohttp
 import base64
 import json
+import os
 import logging
 import re
 from typing import Optional
@@ -815,3 +816,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
