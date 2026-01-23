@@ -1,4 +1,3 @@
-python-telegram-bot[job-queue]
-requests
-pymongo
-dnspython
+python-telegram-bot
+aiohttp
+beautifulsoup4
