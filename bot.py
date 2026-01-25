@@ -1906,24 +1906,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # ===== اضافة مسلسل =====
     if text == "اضافة مسلسل":
-        keyboard = [
-            ["🆕 الاضافات الأخيرة", "📺 مسلسلات"],
-            ["⭐ أعمال مميزة"],
-            ["رجوع"]
-        ]
-        await update.message.reply_text("اختر القسم:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
-        user_states[uid] = {"step": "SERIES_SECTION"}
-        return
-
-    if state.get("step") == "SERIES_SECTION":
-        if text == "رجوع":
-            user_states.pop(uid, None)
-            await show_main_menu(update)
-            return
-        state["section"] = text
-        state["step"] = "SERIES_ID"
-        user_states[uid] = state
-        await update.message.reply_text("ارسل TMDB ID للمسلسل", reply_markup=ReplyKeyboardRemove())
+        user_states[uid] = {"step": "SERIES_ID"}
+        await update.message.reply_text("ارسل TMDB ID للمسلسل:", reply_markup=ReplyKeyboardRemove())
         return
 
     if state.get("step") == "SERIES_ID":
@@ -1950,10 +1934,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 titles["secondary"] = None
         
+        # جلب معلومات المواسم المتاحة
+        available_seasons = []
+        for season in series.get("seasons", []):
+            if season.get("season_number", 0) > 0:  # تجاهل الموسم 0 (الخاص)
+                available_seasons.append({
+                    "number": season.get("season_number"),
+                    "episodes": season.get("episode_count", 0),
+                    "name": season.get("name", f"الموسم {season.get('season_number')}")
+                })
+        
         state["tmdb"] = tmdb_id
         state["series"] = series
         state["titles"] = titles
-        state["step"] = "SERIES_SEASONS_COUNT"
+        state["available_seasons"] = available_seasons
+        state["step"] = "SERIES_SELECT_SEASON"
         user_states[uid] = state
         
         # عرض معلومات المسلسل
@@ -1963,121 +1958,200 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if titles.get("secondary"):
             title_display += f"\n{titles['secondary']}"
         
+        seasons_text = "\n".join([f"  الموسم {s['number']}: {s['episodes']} حلقة" for s in available_seasons])
+        
         info_text = (
             f"المسلسل: {title_display}\n"
             f"التقييم: {series.get('vote_average', 0):.1f}\n"
-            f"عدد المواسم (TMDB): {series.get('number_of_seasons', 0)}\n"
             f"اللغة الأصلية: {series.get('original_language', '-')}\n"
             f"البلد: {', '.join(series.get('origin_country', []))}\n\n"
-            f"كم عدد المواسم التي تريد إضافتها؟"
+            f"المواسم المتاحة:\n{seasons_text}\n\n"
+            f"اختر رقم الموسم الذي تريد إضافته:"
         )
         
+        # إنشاء أزرار المواسم
+        keyboard = []
+        row = []
+        for s in available_seasons:
+            row.append(f"الموسم {s['number']}")
+            if len(row) == 3:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append(["رجوع"])
+        
         if poster:
-            await update.message.reply_photo(photo=poster, caption=info_text)
+            await update.message.reply_photo(
+                photo=poster, 
+                caption=info_text,
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
         else:
-            await update.message.reply_text(info_text)
+            await update.message.reply_text(
+                info_text,
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
         
         return
 
-    if state.get("step") == "SERIES_SEASONS_COUNT":
-        if not text.isdigit():
-            await update.message.reply_text("ارسل رقم صحيح")
+    if state.get("step") == "SERIES_SELECT_SEASON":
+        if text == "رجوع":
+            user_states.pop(uid, None)
+            await show_main_menu(update)
             return
         
-        seasons_count = int(text)
-        state["seasons_count"] = seasons_count
-        state["current_season"] = 1
-        state["episode_links"] = {}
-        state["step"] = "SERIES_EPISODES_COUNT"
-        user_states[uid] = state
-        
-        await update.message.reply_text(f"الموسم 1:\nكم عدد الحلقات في الموسم 1؟")
-        return
-
-    if state.get("step") == "SERIES_EPISODES_COUNT":
-        if not text.isdigit():
-            await update.message.reply_text("ارسل رقم صحيح")
+        # استخراج رقم الموسم
+        season_match = re.search(r'(\d+)', text)
+        if not season_match:
+            await update.message.reply_text("اختر موسم صحيح")
             return
         
-        episodes_count = int(text)
-        current_season = state.get("current_season", 1)
+        season_number = int(season_match.group(1))
+        available_seasons = state.get("available_seasons", [])
         
-        state["current_episodes_count"] = episodes_count
-        state["current_episode"] = 1
-        state["step"] = "SERIES_EPISODE_LINK"
+        # التحقق من وجود الموسم
+        season_info = next((s for s in available_seasons if s["number"] == season_number), None)
+        if not season_info:
+            await update.message.reply_text("الموسم غير موجود")
+            return
+        
+        state["selected_season"] = season_number
+        state["season_episodes_count"] = season_info["episodes"]
+        state["episode_links"] = state.get("episode_links", {})
+        state["step"] = "SERIES_BULK_LINKS"
         user_states[uid] = state
         
         await update.message.reply_text(
-            f"الموسم {current_season} - الحلقة 1:\n"
-            f"ارسل رابط المشاهدة أو Token\n"
-            f"(اكتب 'skip' لتخطي هذه الحلقة)"
+            f"الموسم {season_number} يحتوي على {season_info['episodes']} حلقة\n\n"
+            f"ارسل روابط/Tokens الحلقات (كل سطر = حلقة واحدة بالترتيب):\n"
+            f"مثال:\n"
+            f"token1\n"
+            f"token2\n"
+            f"token3\n\n"
+            f"او اكتب 'skip' لتخطي هذا الموسم",
+            reply_markup=ReplyKeyboardRemove()
         )
         return
 
-    if state.get("step") == "SERIES_EPISODE_LINK":
-        current_season = state.get("current_season", 1)
-        current_episode = state.get("current_episode", 1)
-        episodes_count = state.get("current_episodes_count", 1)
-        seasons_count = state.get("seasons_count", 1)
+    if state.get("step") == "SERIES_BULK_LINKS":
+        season_number = state.get("selected_season")
+        episodes_count = state.get("season_episodes_count", 0)
         
-        # حفظ الرابط
-        if text.lower() != "skip":
-            episode_key = f"{current_season}-{current_episode}"
-            state["episode_links"][episode_key] = text
-        
-        # الانتقال للحلقة التالية
-        if current_episode < episodes_count:
-            state["current_episode"] = current_episode + 1
+        if text.lower() == "skip":
+            # الانتقال لسؤال عن موسم آخر أو الانتهاء
+            state["step"] = "SERIES_MORE_SEASONS"
             user_states[uid] = state
+            
+            keyboard = [["نعم", "لا"]]
             await update.message.reply_text(
-                f"الموسم {current_season} - الحلقة {current_episode + 1}:\n"
-                f"ارسل رابط المشاهدة أو Token\n"
-                f"(اكتب 'skip' لتخطي)"
+                "تم تخطي الموسم.\nهل تريد إضافة موسم آخر؟",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             )
             return
         
-        # الانتقال للموسم التالي
-        if current_season < seasons_count:
-            state["current_season"] = current_season + 1
-            state["current_episode"] = 1
-            state["step"] = "SERIES_EPISODES_COUNT"
-            user_states[uid] = state
-            await update.message.reply_text(f"الموسم {current_season + 1}:\nكم عدد الحلقات في الموسم {current_season + 1}؟")
+        # تقسيم الروابط حسب الأسطر
+        links = [link.strip() for link in text.strip().split('\n') if link.strip()]
+        
+        if len(links) == 0:
+            await update.message.reply_text("لم يتم إرسال أي روابط. حاول مرة أخرى.")
             return
         
-        # اكتمال جميع المواسم
+        # حفظ الروابط
+        for i, link in enumerate(links, 1):
+            episode_key = f"{season_number}-{i}"
+            state["episode_links"][episode_key] = link
+        
+        episodes_added = len(links)
+        state["step"] = "SERIES_MORE_SEASONS"
+        user_states[uid] = state
+        
+        keyboard = [["نعم", "لا"]]
+        await update.message.reply_text(
+            f"تم إضافة {episodes_added} حلقة للموسم {season_number}\n\n"
+            f"هل تريد إضافة موسم آخر؟",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+
+    if state.get("step") == "SERIES_MORE_SEASONS":
+        if text == "نعم":
+            # العودة لاختيار موسم
+            available_seasons = state.get("available_seasons", [])
+            
+            keyboard = []
+            row = []
+            for s in available_seasons:
+                row.append(f"الموسم {s['number']}")
+                if len(row) == 3:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+            keyboard.append(["رجوع"])
+            
+            state["step"] = "SERIES_SELECT_SEASON"
+            user_states[uid] = state
+            
+            await update.message.reply_text(
+                "اختر رقم الموسم:",
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+            return
+        
+        # الانتهاء وحفظ المسلسل
+        episode_links = state.get("episode_links", {})
+        
+        if not episode_links:
+            await update.message.reply_text("لم يتم إضافة أي حلقات. تم إلغاء العملية.")
+            user_states.pop(uid, None)
+            await show_main_menu(update)
+            return
+        
         await update.message.reply_text("جاري إنشاء صفحة المسلسل ورفعها...")
         
         tmdb_id = state.get("tmdb")
         series = state.get("series")
         titles = state.get("titles")
-        section_name = state.get("section", "")
-        episode_links = state.get("episode_links", {})
         
         # إنشاء ورفع ملف HTML
         ok_html = await upload_series_html(tmdb_id, episode_links)
         
-        # إنشاء الكارت
+        # إنشاء الكارت وإضافته لقسمين: الإضافات الأخيرة + المسلسلات
         card_main = build_card_series_main(series, tmdb_id, titles)
         card_disc = build_card_series_discover(series, tmdb_id, titles)
         
-        clean_section = clean_section_name(section_name)
-        section_key = SECTION_MARKERS.get(clean_section, "LATEST")
+        # إضافة الكارت في قسم الإضافات الأخيرة
+        ok_latest = await push_card_to_github(card_main, MAIN_FILE, MARKERS["LATEST"][0], MARKERS["LATEST"][1])
         
-        ok_main = await push_card_to_github(card_main, MAIN_FILE, MARKERS[section_key][0], MARKERS[section_key][1])
+        # إضافة الكارت في قسم المسلسلات
+        ok_series = await push_card_to_github(card_main, MAIN_FILE, MARKERS["SERIES"][0], MARKERS["SERIES"][1])
+        
+        # إضافة الكارت في صفحة اكتشف
         ok_disc = await push_card_to_github(card_disc, DISCOVER_FILE, MARKERS["DISCOVER"][0], MARKERS["DISCOVER"][1])
         
-        if ok_html and ok_main:
+        if ok_html and (ok_latest or ok_series):
             title_display = titles["primary"]
             if titles.get("secondary"):
                 title_display += f" / {titles['secondary']}"
+            
+            # حساب المواسم والحلقات المضافة
+            seasons_added = set()
+            for key in episode_links.keys():
+                s, e = key.split('-')
+                seasons_added.add(int(s))
             
             await update.message.reply_text(
                 f"تمت العملية بنجاح!\n\n"
                 f"المسلسل: {title_display}\n"
                 f"TMDB ID: {tmdb_id}\n"
+                f"المواسم المضافة: {', '.join(map(str, sorted(seasons_added)))}\n"
                 f"عدد الحلقات المضافة: {len(episode_links)}\n"
-                f"الرابط: series/{tmdb_id}.html"
+                f"الرابط: series/{tmdb_id}.html\n\n"
+                f"تم إضافة الكارت في:\n"
+                f"- الإضافات الأخيرة: {'نعم' if ok_latest else 'لا'}\n"
+                f"- قسم المسلسلات: {'نعم' if ok_series else 'لا'}\n"
+                f"- صفحة اكتشف: {'نعم' if ok_disc else 'لا'}"
             )
         else:
             await update.message.reply_text("فشل في بعض العمليات. تحقق من السجلات.")
@@ -2097,17 +2171,48 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_main_menu(update)
             return
         
-        state["series_list"] = series_list
+        # جلب معلومات كل مسلسل من TMDB
+        enriched_list = []
+        for s in series_list[:15]:  # حد أقصى 15
+            series_data = await get_series(s["id"])
+            if series_data:
+                enriched_list.append({
+                    "id": s["id"],
+                    "name": series_data.get("name", "بدون اسم"),
+                    "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None
+                })
+            else:
+                enriched_list.append({
+                    "id": s["id"],
+                    "name": f"مسلسل {s['id']}",
+                    "poster": None
+                })
+        
+        state["series_list"] = enriched_list
         state["step"] = "REVIEW_SELECT"
         user_states[uid] = state
         
+        # عرض المسلسلات مع الصور
         keyboard = []
-        for s in series_list[:20]:  # حد أقصى 20
-            keyboard.append([s["id"]])
+        for s in enriched_list:
+            try:
+                if s['poster']:
+                    await update.message.reply_photo(
+                        photo=s['poster'],
+                        caption=f"{s['name']}\nID: {s['id']}"
+                    )
+                else:
+                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
+            except Exception as e:
+                await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
+            
+            # إضافة زر للاختيار
+            keyboard.append([f"{s['name'][:25]} ({s['id']})"])
+        
         keyboard.append(["رجوع"])
         
         await update.message.reply_text(
-            "اختر المسلسل (TMDB ID):",
+            "اختر المسلسل:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return
@@ -2118,7 +2223,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_main_menu(update)
             return
         
-        tmdb_id = text
+        # استخراج ID من النص (قد يكون بصيغة "اسم المسلسل (ID)")
+        id_match = re.search(r'\((\d+)\)$', text)
+        if id_match:
+            tmdb_id = id_match.group(1)
+        else:
+            tmdb_id = text.strip()
         
         await update.message.reply_text("جاري جلب معلومات المسلسل...")
         
@@ -2253,43 +2363,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ارسل رقم صحيح")
             return
         state["new_season"] = int(text)
-        state["step"] = "ADD_SEASON_EPISODES_COUNT"
-        user_states[uid] = state
-        await update.message.reply_text(f"كم عدد حلقات الموسم {text}؟")
-        return
-
-    if state.get("step") == "ADD_SEASON_EPISODES_COUNT":
-        if not text.isdigit():
-            await update.message.reply_text("ارسل رقم صحيح")
-            return
-        
-        state["new_season_episodes"] = int(text)
-        state["new_season_current"] = 1
-        state["new_season_links"] = {}
-        state["step"] = "ADD_SEASON_EPISODE_LINK"
+        state["step"] = "ADD_SEASON_BULK_LINKS"
         user_states[uid] = state
         
         season = state.get("new_season")
-        await update.message.reply_text(f"الموسم {season} - الحلقة 1:\nارسل الرابط أو Token (او 'skip'):")
+        await update.message.reply_text(
+            f"الموسم {season}:\n\n"
+            f"ارسل روابط/Tokens الحلقات (كل سطر = حلقة واحدة بالترتيب):\n"
+            f"مثال:\n"
+            f"token1\n"
+            f"token2\n"
+            f"token3"
+        )
         return
 
-    if state.get("step") == "ADD_SEASON_EPISODE_LINK":
+    if state.get("step") == "ADD_SEASON_BULK_LINKS":
         season = state.get("new_season")
-        current = state.get("new_season_current")
-        total = state.get("new_season_episodes")
-        
-        if text.lower() != "skip":
-            state["new_season_links"][f"{season}-{current}"] = text
-        
-        if current < total:
-            state["new_season_current"] = current + 1
-            user_states[uid] = state
-            await update.message.reply_text(f"الموسم {season} - الحلقة {current + 1}:\nارسل الرابط أو Token (او 'skip'):")
-            return
-        
-        # اكتمال الموسم
         tmdb_id = state.get("review_tmdb")
-        new_links = state.get("new_season_links", {})
+        
+        # تقسيم الروابط حسب الأسطر
+        links = [link.strip() for link in text.strip().split('\n') if link.strip()]
+        
+        if len(links) == 0:
+            await update.message.reply_text("لم يتم إرسال أي روابط. حاول مرة أخرى.")
+            return
+        
+        # حفظ الروابط
+        new_links = {}
+        for i, link in enumerate(links, 1):
+            episode_key = f"{season}-{i}"
+            new_links[episode_key] = link
         
         await update.message.reply_text("جاري تحديث الملف...")
         
