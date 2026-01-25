@@ -1,4 +1,4 @@
-# bot.py - Cinema Plus Bot with BeautifulSoup HTML Parser
+# bot.py - Cinema Plus Bot with Series Management
 import asyncio
 import aiohttp
 import base64
@@ -6,24 +6,25 @@ import json
 import os
 import logging
 import re
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 from bs4 import BeautifulSoup, Comment
 
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputMediaPhoto
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputMediaPhoto, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # ----------------------------- CONFIG -----------------------------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GITHUB_TOKEN   = os.getenv("GITHUB_TOKEN")
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
 REPO_OWNER = "ffrrx-2000"
-REPO_NAME  = "cinema-plas-bot"
-BRANCH     = "main"
+REPO_NAME = "cinema-plas-bot"
+BRANCH = "main"
 
 # Files in repo
-MAIN_FILE     = "index.html"
+MAIN_FILE = "index.html"
 DISCOVER_FILE = "discover.html"
+SERIES_FOLDER = "series"  # مجلد ملفات المسلسلات
 
-TMDB_API_KEY  = os.getenv("TMDB_API_KEY")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 ADMIN_ID = 5529978863
 
 GITHUB_HEADERS = {
@@ -31,7 +32,7 @@ GITHUB_HEADERS = {
     "Accept": "application/vnd.github.v3+json"
 }
 
-# Markers - تطابق الموجودة في ملف HTML
+# Markers
 MARKERS = {
     "LATEST": ("<!-- START_LATEST -->", "<!-- END_LATEST -->"),
     "DISCOVER": ("<!-- START_DISCOVER -->", "<!-- END_DISCOVER -->"),
@@ -44,7 +45,6 @@ MARKERS = {
     "SERIES": ("<!-- START_SERIES -->", "<!-- END_SERIES -->"),
 }
 
-# ربط اسماء الاقسام بالمفاتيح
 SECTION_MARKERS = {
     "الاضافات الأخيرة": "LATEST",
     "الاعمال الجديدة": "NEW",
@@ -56,6 +56,19 @@ SECTION_MARKERS = {
     "مسلسلات": "SERIES",
 }
 
+# ----------------------------- LANGUAGE RULES -----------------------------
+# الدول الغربية (إنجليزي + عربي)
+WESTERN_COUNTRIES = ['US', 'GB', 'CA', 'AU', 'NZ', 'IE', 'FR', 'DE', 'IT', 'ES', 'PT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI', 'PL', 'CZ', 'HU', 'RO', 'GR', 'RU', 'UA', 'MX', 'BR', 'AR', 'CO', 'CL', 'PE']
+WESTERN_LANGUAGES = ['en', 'fr', 'de', 'it', 'es', 'pt', 'nl', 'sv', 'no', 'da', 'fi', 'pl', 'cs', 'hu', 'ro', 'el', 'ru', 'uk']
+
+# الدول الآسيوية (إنجليزي فقط)
+ASIAN_COUNTRIES = ['JP', 'KR', 'CN', 'TW', 'HK', 'TH', 'VN', 'ID', 'MY', 'PH', 'SG', 'IN']
+ASIAN_LANGUAGES = ['ja', 'ko', 'zh', 'th', 'vi', 'id', 'ms', 'tl', 'hi', 'ta', 'te', 'ml', 'bn']
+
+# تركيا (تركي + إنجليزي)
+TURKISH_COUNTRIES = ['TR']
+TURKISH_LANGUAGES = ['tr']
+
 # ----------------------------- LOGGING -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -63,9 +76,69 @@ logger = logging.getLogger(__name__)
 # ----------------------------- STATE -----------------------------
 user_states = {}
 
+# ----------------------------- TITLE DISPLAY LOGIC -----------------------------
+def determine_title_display(data: dict) -> Dict[str, str]:
+    """
+    تحديد كيفية عرض العناوين بناءً على قواعد TMDB
+    Returns: {"primary": "...", "secondary": "..." or None}
+    """
+    original_language = data.get("original_language", "")
+    origin_country = data.get("origin_country", [])
+    if not origin_country:
+        origin_country = data.get("production_countries", [])
+        if origin_country:
+            origin_country = [c.get("iso_3166_1", "") for c in origin_country]
+    
+    # العنوان الأصلي
+    original_title = data.get("original_name") or data.get("original_title") or ""
+    # العنوان الإنجليزي
+    english_title = data.get("name") or data.get("title") or ""
+    # العنوان العربي (من الترجمة)
+    arabic_title = None
+    
+    result = {"primary": "", "secondary": None}
+    
+    # 1) المحتوى التركي: تركي + إنجليزي
+    if original_language in TURKISH_LANGUAGES or any(c in TURKISH_COUNTRIES for c in origin_country):
+        result["primary"] = original_title  # التركي
+        if english_title and english_title != original_title:
+            result["secondary"] = english_title  # الإنجليزي
+        return result
+    
+    # 2) المحتوى الآسيوي: إنجليزي فقط
+    if original_language in ASIAN_LANGUAGES or any(c in ASIAN_COUNTRIES for c in origin_country):
+        result["primary"] = english_title  # الإنجليزي فقط
+        result["secondary"] = None  # لا عربي
+        return result
+    
+    # 3) المحتوى الغربي: إنجليزي + عربي
+    if original_language in WESTERN_LANGUAGES or any(c in WESTERN_COUNTRIES for c in origin_country):
+        result["primary"] = english_title  # الإنجليزي
+        # سنحصل على العنوان العربي لاحقًا من fetch_arabic_title
+        result["secondary"] = "FETCH_ARABIC"  # علامة لجلب العربي
+        return result
+    
+    # افتراضي: إنجليزي + عربي
+    result["primary"] = english_title
+    result["secondary"] = "FETCH_ARABIC"
+    return result
+
+async def fetch_arabic_title(tmdb_id: str, media_type: str = "tv") -> Optional[str]:
+    """جلب العنوان العربي من TMDB"""
+    url = f"https://api.themoviedb.org/3/{media_type}/{tmdb_id}?api_key={TMDB_API_KEY}&language=ar"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=20) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("name") or data.get("title")
+    except Exception as e:
+        logger.exception("Error fetching Arabic title: %s", e)
+    return None
+
 # ----------------------------- TMDB HELPERS -----------------------------
-async def fetch_tmdb(path: str) -> Optional[dict]:
-    url = f"https://api.themoviedb.org/3{path}?api_key={TMDB_API_KEY}&language=ar"
+async def fetch_tmdb(path: str, language: str = "en") -> Optional[dict]:
+    url = f"https://api.themoviedb.org/3{path}?api_key={TMDB_API_KEY}&language={language}"
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=20) as resp:
@@ -84,6 +157,1256 @@ async def get_movie(tmdb_id: str):
 async def get_series(tmdb_id: str):
     return await fetch_tmdb(f"/tv/{tmdb_id}")
 
+async def get_series_season(tmdb_id: str, season_number: int):
+    return await fetch_tmdb(f"/tv/{tmdb_id}/season/{season_number}")
+
+# ----------------------------- HTML TEMPLATE FOR SERIES -----------------------------
+def generate_series_html(tmdb_id: str, episode_links: Dict[str, str]) -> str:
+    """
+    إنشاء ملف HTML للمسلسل باستخدام القالب
+    episode_links: {"1-1": "token", "1-2": "token", ...}
+    """
+    # تحويل episode_links إلى JavaScript object
+    links_js = json.dumps(episode_links, ensure_ascii=False, indent=4)
+    
+    html_template = f'''<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>صفحة مسلسل</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<style>
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body, html {{
+    height: 100%;
+    font-family: "Segoe UI", Tahoma, sans-serif;
+    color: #fff;
+    background: #000;
+    overflow-x: hidden;
+  }}
+
+  .movie-page {{
+    position: relative;
+    width: 100%;
+    height: 600px;
+    background-size: contain;
+    background-repeat: no-repeat;
+    background-position: top center;
+  }}
+  .movie-page::after {{
+    content: "";
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    height: 400px;
+    background: linear-gradient(to top, rgba(0,0,0,0.98) 50%, rgba(0,0,0,0) 90%);
+    pointer-events: none;
+  }}
+  .content {{
+    position: absolute;
+    top: 60%;
+    left: 20px;
+    right: 20px;
+    transform: translateY(-0%);
+    z-index: 1;
+  }}
+  .meta {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-size: 0.9rem;
+    opacity: 0.9;
+    margin-bottom: 15px;
+  }}
+  .title-section {{
+    text-align: center;
+    margin-bottom: 10px;
+  }}
+  .primary-title {{
+    font-size: 1.8rem;
+    font-weight: bold;
+    color: #fff;
+    margin-bottom: 5px;
+  }}
+  .secondary-title {{
+    font-size: 1.2rem;
+    color: #aaa;
+    font-weight: normal;
+  }}
+  .imdb {{
+    display: flex;
+    align-items: center;
+    background: #f5c518;
+    color: #000;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: bold;
+    margin-bottom: 5px;
+  }}
+  .imdb img {{ height: 16px; margin-left: 5px; }}
+  .sub-meta {{
+    display: flex;
+    gap: 15px;
+    justify-content: center;
+  }}
+  .controls {{
+    display: flex;
+    justify-content: space-around;
+    align-items: center;
+    max-width: 400px;
+    margin: 0 auto 20px;
+  }}
+  .controls .icon-btn {{
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    font-size: 1.2rem;
+    cursor: pointer;
+    opacity: 0.8;
+  }}
+  .controls .icon-btn span {{
+    font-size: 0.75rem;
+    margin-top: 4px;
+  }}
+  .controls .play-btn {{
+    background: #e50914;
+    color: #fff;
+    padding: 8px 18px;
+    border-radius: 20px;
+    font-size: 1rem;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    opacity: 1;
+  }}
+  .description-wrapper {{
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    font-size: 0.9rem;
+    line-height: 1.4;
+    margin-bottom: 30px;
+  }}
+  .rating-box {{
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    border: 1px solid #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+  }}
+  .description {{
+    flex: 1;
+    opacity: 0.9;
+  }}
+  .cast-section {{
+    margin-bottom: 20px;
+  }}
+  .cast-section h3 {{
+    font-size: 1rem;
+    margin-bottom: 8px;
+    text-align: right;
+  }}
+  .cast-list {{
+    display: flex;
+    gap: 10px;
+    overflow-x: auto;
+    padding-bottom: 5px;
+  }}
+  .cast-item {{
+    flex: 0 0 auto;
+    width: 80px;
+    text-align: center;
+    font-size: 0.75rem;
+  }}
+  .cast-item img {{
+    width: 80px;
+    height: 80px;
+    object-fit: cover;
+    border-radius: 50%;
+  }}
+  .cast-item .name {{
+    margin-top: 4px;
+    color: #eee;
+  }}
+
+  .video-modal {{
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0.85);
+    z-index: 1000;
+    display: none;
+    justify-content: center;
+    align-items: center;
+  }}
+  .video-modal.active {{
+    display: flex;
+  }}
+  .video-container {{
+    width: auto;
+    max-width: 90%;
+    max-height: 70vh;
+    background-color: #1a1c24;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+  }}
+  .video-header {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background-color: #1a1c24;
+    border-bottom: 1px solid #2c2f3a;
+  }}
+  .video-title {{
+    font-weight: bold;
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+  .close-btn {{
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    margin-right: -5px;
+  }}
+  .video-player-wrapper {{
+    position: relative;
+    width: 100%;
+    background-color: #000;
+  }}
+  #videoPlayer {{
+    display: block;
+    width: 100%;
+    max-height: 60vh;
+  }}
+  .video-controls {{
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    direction: ltr;
+    transition: opacity 0.3s ease;
+    opacity: 1;
+    pointer-events: auto;
+    z-index: 100;
+  }}
+  .progress-container {{
+    width: 100%;
+    height: 3px;
+    background-color: rgba(255, 255, 255, 0.3);
+    border-radius: 1.5px;
+    margin-bottom: 8px;
+    cursor: pointer;
+  }}
+  .progress-bar {{
+    height: 100%;
+    background-color: #e50914;
+    border-radius: 1.5px;
+    width: 0%;
+  }}
+  .control-buttons {{
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }}
+  .left-controls, .right-controls {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }}
+  .control-btn {{
+    background: none;
+    border: none;
+    color: #fff;
+    cursor: pointer;
+    width: 24px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }}
+  .play-pause-btn {{
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 1px solid #e50914;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }}
+  .time-display {{
+    font-size: 11px;
+    color: #fff;
+  }}
+  .fullscreen-btn {{
+    margin-left: 8px;
+  }}
+  .video-player-wrapper.fullscreen {{
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw !important;
+    height: 100vh !important;
+    background: #000;
+    z-index: 2000;
+  }}
+  .video-player-wrapper.fullscreen #videoPlayer {{
+    width: 100% !important;
+    height: 100% !important;
+    max-height: none !important;
+    object-fit: contain !important;
+  }}
+
+  .trailers-section {{
+    margin-top: 40px;
+    margin-bottom: 40px;
+  }}
+  .trailers-section h3 {{
+    font-size: 1.2rem;
+    margin-bottom: 15px;
+    text-align: right;
+    color: #fff;
+  }}
+  .trailers-row {{
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 5px;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+  }}
+  .trailers-row::-webkit-scrollbar {{
+    display: none;
+  }}
+  .trailer-item {{
+    flex: 0 0 auto;
+    width: 240px;
+    position: relative;
+    display: block;
+    aspect-ratio: 16/9;
+    background-color: #000;
+    border-radius: 8px;
+    overflow: hidden;
+    transition: transform 0.2s;
+  }}
+  .trailer-item:hover {{
+    transform: scale(1.05);
+  }}
+  .trailer-item img {{
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }}
+  .trailer-item i.fa-play {{
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 36px;
+    color: white;
+    text-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+  }}
+
+  .seasons-section {{
+    margin-top: 40px;
+    margin-bottom: 40px;
+  }}
+  .seasons-section h3 {{
+    font-size: 1.3rem;
+    margin-bottom: 20px;
+    text-align: right;
+    color: #fff;
+    font-weight: bold;
+  }}
+  .seasons-row {{
+    display: flex;
+    gap: 15px;
+    overflow-x: auto;
+    padding: 10px 0;
+    scroll-behavior: smooth;
+    scrollbar-width: none;
+  }}
+  .seasons-row::-webkit-scrollbar {{
+    display: none;
+  }}
+  .season-item {{
+    flex: 0 0 auto;
+    width: 160px;
+    cursor: pointer;
+    transition: transform 0.3s ease;
+  }}
+  .season-item:hover {{
+    transform: scale(1.05);
+  }}
+  .season-poster {{
+    width: 100%;
+    height: 220px;
+    object-fit: cover;
+    border-radius: 12px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+  }}
+  .season-info {{
+    margin-top: 10px;
+    text-align: center;
+  }}
+  .season-title {{
+    color: #fff;
+    font-size: 1rem;
+    font-weight: bold;
+    margin-bottom: 5px;
+  }}
+  .season-episodes {{
+    color: #888;
+    font-size: 0.85rem;
+  }}
+
+  .episodes-section {{
+    margin-top: 40px;
+    margin-bottom: 40px;
+  }}
+  .episodes-section h3 {{
+    font-size: 1.3rem;
+    margin-bottom: 20px;
+    text-align: right;
+    color: #fff;
+    font-weight: bold;
+  }}
+  .episodes-list {{
+    display: none;
+  }}
+  .episodes-list.active {{
+    display: block;
+  }}
+  .episode-item {{
+    display: flex;
+    align-items: flex-start;
+    background: transparent;
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid #333;
+    position: relative;
+    cursor: pointer;
+    transition: background-color 0.3s ease;
+  }}
+  .episode-item:hover {{
+    background-color: rgba(255, 255, 255, 0.05);
+    border-radius: 8px;
+  }}
+  .episode-content {{
+    flex: 1;
+    padding-left: 15px;
+    text-align: right;
+  }}
+  .episode-title {{
+    color: #fff;
+    font-size: 1.2rem;
+    font-weight: bold;
+    margin-bottom: 10px;
+    line-height: 1.3;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }}
+  .episode-duration {{
+    color: #888;
+    font-size: 0.9rem;
+    margin-bottom: 10px;
+  }}
+  .episode-description {{
+    color: #ccc;
+    font-size: 0.95rem;
+    line-height: 1.4;
+    margin-bottom: 15px;
+  }}
+  .episode-description.collapsed {{
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }}
+  .show-more {{
+    color: #1e90ff;
+    cursor: pointer;
+    font-weight: bold;
+    margin-top: 5px;
+    display: inline-block;
+  }}
+  .episode-thumbnail {{
+    width: 120px;
+    height: 80px;
+    object-fit: cover;
+    border-radius: 8px;
+    flex-shrink: 0;
+  }}
+
+  .recommend-section {{
+    margin-top: 40px;
+  }}
+  .recommend-section h3 {{
+    font-size: 1.2em;
+    margin-bottom: 10px;
+    text-align: right;
+  }}
+  .recommend-row {{
+    display: flex;
+    gap: 12px;
+    overflow-x: auto;
+    padding-bottom: 10px;
+    scroll-behavior: smooth;
+  }}
+  .recommend-card {{
+    flex: 0 0 auto;
+    width: 140px;
+    background-color: #111;
+    border-radius: 8px;
+    overflow: hidden;
+    text-align: center;
+    color: #fff;
+    transition: transform 0.2s;
+  }}
+  .recommend-card:hover {{
+    transform: scale(1.05);
+  }}
+  .recommend-card img {{
+    width: 100%;
+    height: 200px;
+    object-fit: cover;
+  }}
+
+  .video-controls.hidden {{
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }}
+  .controls .icon-btn.active {{
+    color: #e50914;
+    opacity: 1;
+  }}
+  .skip-btn {{
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+  }}
+  .quality-btn {{
+    position: relative;
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.3);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+  }}
+  .quality-menu {{
+    position: absolute;
+    bottom: 40px;
+    right: 0;
+    background: rgba(0, 0, 0, 0.95);
+    border-radius: 8px;
+    padding: 8px 0;
+    min-width: 120px;
+    display: none;
+    flex-direction: column;
+    z-index: 1000;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+  }}
+  .quality-menu.active {{
+    display: flex;
+  }}
+  .quality-option {{
+    padding: 10px 16px;
+    cursor: pointer;
+    color: #fff;
+    font-size: 13px;
+    transition: background-color 0.2s;
+    text-align: right;
+  }}
+  .quality-option:hover {{
+    background-color: rgba(255, 255, 255, 0.1);
+  }}
+  .quality-option.selected {{
+    color: #e50914;
+    font-weight: bold;
+  }}
+  .tmdb-logo {{
+    margin-bottom: 5px;
+    text-align: center;
+  }}
+  .tmdb-logo img {{
+    height: 70px;
+    object-fit: contain;
+  }}
+  * {{
+    -webkit-tap-highlight-color: transparent;
+  }}
+  a, button, div, span {{
+    outline: none;
+  }}
+</style>
+</head>
+<body>
+
+<div class="movie-page" id="moviePage">
+<div class="content">
+  <div class="meta">
+    <div class="tmdb-logo" id="seriesLogo"></div>
+    <div class="title-section">
+      <div class="primary-title" id="primaryTitle"></div>
+      <div class="secondary-title" id="secondaryTitle"></div>
+    </div>
+    <div class="imdb">
+      <img src="https://upload.wikimedia.org/wikipedia/commons/6/69/IMDB_Logo_2016.svg" alt="IMDb">
+      <span id="imdbRating">0.0</span>
+    </div>
+    <div class="sub-meta">
+      <div id="yearGenre"></div>
+      <div id="seasons"></div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <div class="icon-btn" title="أعجبني" id="likeBtn"><i class="fa-regular fa-heart"></i><span>أعجبني</span></div>
+    <div class="icon-btn" title="مشاهدة لاحقاً" id="watchLaterBtn"><i class="fa-regular fa-bookmark"></i><span>لاحقاً</span></div>
+    <div class="play-btn" title="شاهد الآن" id="watchNowBtn"><i class="fa-solid fa-play"></i><span>S1 E1</span></div>
+    <div class="icon-btn" title="تحميل"><i class="fa-solid fa-download"></i><span>تحميل</span></div>
+    <div class="icon-btn" title="مشاهدة الإعلان"><i class="fa-brands fa-youtube"></i><span>إعلان</span></div>
+  </div>
+
+  <div class="description-wrapper">
+    <div class="rating-box">R</div>
+    <div class="description" id="overview">جاري جلب التفاصيل...</div>
+  </div>
+
+  <div class="cast-section">
+    <h3>الممثلون</h3>
+    <div class="cast-list" id="castList"></div>
+  </div>
+  
+  <div class="trailers-section">
+    <h3>الإعلانات</h3>
+    <div id="trailersList" class="trailers-row"></div>
+  </div>
+
+  <div class="seasons-section">
+    <h3>المواسم</h3>
+    <div id="seasonsList" class="seasons-row"></div>
+  </div>
+
+  <div class="episodes-section">
+    <h3>الحلقات</h3>
+    <div id="episodesList"></div>
+  </div>
+  
+  <div class="recommend-section">
+    <h3>مقترحات</h3>
+    <div id="recommendations" class="recommend-row"></div>
+  </div>
+</div>
+</div>
+
+<div class="video-modal" id="videoModal">
+<div class="video-container">
+  <div class="video-header">
+    <div class="video-title" id="videoTitle"></div>
+    <button class="close-btn" id="closeVideoBtn">x</button>
+  </div>
+  <div class="video-player-wrapper" id="videoPlayerWrapper">
+    <video id="videoPlayer" playsinline>
+      <source src="#" type="video/mp4">
+    </video>
+    <div class="video-controls" id="videoControls">
+      <div class="progress-container" id="progressContainer">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+      <div class="control-buttons">
+        <div class="left-controls">
+          <button class="control-btn skip-btn" id="backwardBtn"><i class="fa-solid fa-backward-step"></i></button>
+          <button class="control-btn play-pause-btn" id="playPauseBtn"><i class="fa-solid fa-pause" id="playPauseIcon"></i></button>
+          <button class="control-btn skip-btn" id="forwardBtn"><i class="fa-solid fa-forward-step"></i></button>
+          <div class="time-display"><span id="currentTime">00:00</span> / <span id="totalTime">00:00</span></div>
+        </div>
+        <div class="right-controls">
+          <button class="control-btn" id="aspectBtn"><i class="fa-solid fa-tv"></i></button>
+          <div style="position: relative;">
+            <button class="control-btn quality-btn" id="qualityBtn"><i class="fa-solid fa-gear"></i></button>
+            <div class="quality-menu" id="qualityMenu"></div>
+          </div>
+          <button class="control-btn fullscreen-btn" id="fullscreenBtn"><i class="fa-solid fa-expand"></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const API_KEY = "06f120992cfacd7c118f6e7086d23544";
+const SERIES_ID = {tmdb_id};
+
+const episodeLinks = {links_js};
+
+// ===== قواعد عرض العناوين =====
+const WESTERN_LANGUAGES = ['en', 'fr', 'de', 'it', 'es', 'pt', 'nl', 'sv', 'no', 'da', 'fi', 'pl', 'cs', 'hu', 'ro', 'el', 'ru', 'uk'];
+const ASIAN_LANGUAGES = ['ja', 'ko', 'zh', 'th', 'vi', 'id', 'ms', 'tl', 'hi', 'ta', 'te', 'ml', 'bn'];
+const TURKISH_LANGUAGES = ['tr'];
+const WESTERN_COUNTRIES = ['US', 'GB', 'CA', 'AU', 'NZ', 'IE', 'FR', 'DE', 'IT', 'ES', 'PT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI', 'PL', 'CZ', 'HU', 'RO', 'GR', 'RU', 'UA', 'MX', 'BR', 'AR', 'CO', 'CL', 'PE'];
+const ASIAN_COUNTRIES = ['JP', 'KR', 'CN', 'TW', 'HK', 'TH', 'VN', 'ID', 'MY', 'PH', 'SG', 'IN'];
+const TURKISH_COUNTRIES = ['TR'];
+
+function determineTitleDisplay(data, arabicData) {{
+  const originalLang = data.original_language || '';
+  const originCountry = data.origin_country || [];
+  const originalTitle = data.original_name || '';
+  const englishTitle = data.name || '';
+  const arabicTitle = arabicData ? arabicData.name : null;
+  
+  let primary = '';
+  let secondary = null;
+  
+  // تركي
+  if (TURKISH_LANGUAGES.includes(originalLang) || originCountry.some(c => TURKISH_COUNTRIES.includes(c))) {{
+    primary = originalTitle;
+    if (englishTitle && englishTitle !== originalTitle) {{
+      secondary = englishTitle;
+    }}
+  }}
+  // آسيوي
+  else if (ASIAN_LANGUAGES.includes(originalLang) || originCountry.some(c => ASIAN_COUNTRIES.includes(c))) {{
+    primary = englishTitle;
+    secondary = null;
+  }}
+  // غربي
+  else {{
+    primary = englishTitle;
+    if (arabicTitle && arabicTitle !== englishTitle) {{
+      secondary = arabicTitle;
+    }}
+  }}
+  
+  return {{ primary, secondary }};
+}}
+
+let currentSeason = 1;
+let isFullscreen = false;
+let controlsVisible = true;
+let controlsTimeout;
+let hls = null;
+let currentQualityLevels = [];
+
+const videoModal = document.getElementById("videoModal");
+const watchNowBtn = document.getElementById("watchNowBtn");
+const closeVideoBtn = document.getElementById("closeVideoBtn");
+const videoPlayer = document.getElementById("videoPlayer");
+const playPauseBtn = document.getElementById("playPauseBtn");
+const playPauseIcon = document.getElementById("playPauseIcon");
+const currentTimeDisplay = document.getElementById("currentTime");
+const totalTimeDisplay = document.getElementById("totalTime");
+const progressContainer = document.getElementById("progressContainer");
+const progressBar = document.getElementById("progressBar");
+const fullscreenBtn = document.getElementById("fullscreenBtn");
+const aspectBtn = document.getElementById("aspectBtn");
+const videoPlayerWrapper = document.getElementById("videoPlayerWrapper");
+const videoControls = document.getElementById("videoControls");
+const backwardBtn = document.getElementById("backwardBtn");
+const forwardBtn = document.getElementById("forwardBtn");
+const qualityBtn = document.getElementById("qualityBtn");
+const qualityMenu = document.getElementById("qualityMenu");
+const likeBtn = document.getElementById("likeBtn");
+const watchLaterBtn = document.getElementById("watchLaterBtn");
+
+backwardBtn.addEventListener("click", (e) => {{
+  e.stopPropagation();
+  videoPlayer.currentTime = Math.max(0, videoPlayer.currentTime - 10);
+  resetControlsTimer();
+}});
+
+forwardBtn.addEventListener("click", (e) => {{
+  e.stopPropagation();
+  videoPlayer.currentTime = Math.min(videoPlayer.duration, videoPlayer.currentTime + 10);
+  resetControlsTimer();
+}});
+
+// جلب بيانات المسلسل
+Promise.all([
+  fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}?api_key=${{API_KEY}}&language=en`).then(r => r.json()),
+  fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}?api_key=${{API_KEY}}&language=ar`).then(r => r.json())
+]).then(([enData, arData]) => {{
+  const titles = determineTitleDisplay(enData, arData);
+  
+  document.getElementById("primaryTitle").textContent = titles.primary;
+  if (titles.secondary) {{
+    document.getElementById("secondaryTitle").textContent = titles.secondary;
+  }} else {{
+    document.getElementById("secondaryTitle").style.display = 'none';
+  }}
+  
+  // جلب صورة البوستر
+  fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/images?api_key=${{API_KEY}}`)
+    .then(res => res.json())
+    .then(images => {{
+      const cleanPoster = images.posters.find(p => p.iso_639_1 === null);
+      const imagePath = cleanPoster ? cleanPoster.file_path : enData.poster_path;
+      if (imagePath) {{
+        document.getElementById("moviePage").style.backgroundImage = `url(https://image.tmdb.org/t/p/original${{imagePath}})`;
+      }}
+    }});
+  
+  document.getElementById("imdbRating").textContent = enData.vote_average.toFixed(1);
+  const genres = enData.genres.map(g => g.name).join(" . ");
+  document.getElementById("yearGenre").textContent = `${{enData.first_air_date.slice(0,4)}} . ${{genres}}`;
+  document.getElementById("seasons").textContent = `${{enData.number_of_seasons}} مواسم . ${{enData.number_of_episodes}} حلقة`;
+  document.getElementById("overview").textContent = arData.overview || enData.overview;
+  document.getElementById("videoTitle").textContent = titles.primary;
+  
+  displaySeasons(enData.seasons);
+}});
+
+// جلب الممثلين
+fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/credits?api_key=${{API_KEY}}&language=ar`)
+  .then(res => res.json())
+  .then(credits => {{
+    const castList = document.getElementById("castList");
+    credits.cast.slice(0, 10).forEach(member => {{
+      const div = document.createElement("div");
+      div.className = "cast-item";
+      div.innerHTML = `
+        <img src="${{member.profile_path ? `https://image.tmdb.org/t/p/w185${{member.profile_path}}` : 'https://g.top4top.io/p_34489upmc7.jpg'}}" alt="${{member.name}}">
+        <div class="name">${{member.name}}</div>
+      `;
+      castList.appendChild(div);
+    }});
+  }});
+
+function displaySeasons(seasons) {{
+  const seasonsList = document.getElementById("seasonsList");
+  seasons.forEach(season => {{
+    if (season.season_number === 0) return;
+    if (!season.air_date) return;
+    const seasonAirDate = new Date(season.air_date);
+    const currentDate = new Date();
+    if (seasonAirDate > currentDate) return;
+    if (!season.episode_count || season.episode_count === 0) return;
+    
+    const seasonItem = document.createElement("div");
+    seasonItem.className = "season-item";
+    seasonItem.onclick = () => showEpisodes(season.season_number);
+    seasonItem.innerHTML = `
+      <img src="${{season.poster_path ? `https://image.tmdb.org/t/p/w500${{season.poster_path}}` : 'https://g.top4top.io/p_34489upmc7.jpg'}}" alt="الموسم ${{season.season_number}}" class="season-poster">
+      <div class="season-info">
+        <div class="season-title">الموسم ${{season.season_number}}</div>
+        <div class="season-episodes">${{season.episode_count}} حلقة</div>
+      </div>
+    `;
+    seasonsList.appendChild(seasonItem);
+  }});
+}}
+
+function showEpisodes(seasonNumber) {{
+  currentSeason = seasonNumber;
+  const episodesList = document.getElementById("episodesList");
+  const allEpisodeLists = episodesList.querySelectorAll('.episodes-list');
+  allEpisodeLists.forEach(list => list.classList.remove('active'));
+  
+  let currentEpisodesList = document.getElementById(`episodes-season-${{seasonNumber}}`);
+  
+  if (!currentEpisodesList) {{
+    currentEpisodesList = document.createElement('div');
+    currentEpisodesList.id = `episodes-season-${{seasonNumber}}`;
+    currentEpisodesList.className = 'episodes-list';
+    
+    fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/season/${{seasonNumber}}?api_key=${{API_KEY}}&language=ar`)
+      .then(res => res.json())
+      .then(data => {{
+        data.episodes.forEach(episode => {{
+          const episodeElement = createEpisodeElement(episode, seasonNumber);
+          currentEpisodesList.appendChild(episodeElement);
+        }});
+      }});
+    
+    episodesList.appendChild(currentEpisodesList);
+  }}
+  
+  currentEpisodesList.classList.add('active');
+}}
+
+function createEpisodeElement(episode, seasonNumber) {{
+  const episodeItem = document.createElement('div');
+  episodeItem.className = 'episode-item';
+  
+  const stillPath = episode.still_path ? `https://image.tmdb.org/t/p/w300${{episode.still_path}}` : 'https://g.top4top.io/p_34489upmc7.jpg';
+  const runtime = episode.runtime || 45;
+  const episodeKey = `${{seasonNumber}}-${{episode.episode_number}}`;
+  const videoUrl = episodeLinks[episodeKey] || '#';
+  const durationText = `${{Math.floor(runtime)}} د`;
+  const description = episode.overview || '';
+  const shortDescription = description.length > 100 ? description.substring(0, 100) + '...' : description;
+  
+  episodeItem.innerHTML = `
+    <div class="episode-content">
+      <div class="episode-title">${{episode.name || `الحلقة ${{episode.episode_number}}`}} | E${{episode.episode_number}}</div>
+      <div class="episode-duration">${{durationText}}</div>
+      <div class="episode-description collapsed" data-full="${{description}}">
+        ${{shortDescription}}
+        ${{description.length > 100 ? '<span class="show-more">اظهر المزيد</span>' : ''}}
+      </div>
+    </div>
+    <img src="${{stillPath}}" alt="الحلقة ${{episode.episode_number}}" class="episode-thumbnail">
+  `;
+  
+  episodeItem.addEventListener('click', (e) => {{
+    if (!e.target.classList.contains('show-more')) {{
+      playEpisode(videoUrl, `الموسم ${{seasonNumber}} - الحلقة ${{episode.episode_number}}`);
+    }}
+  }});
+  
+  return episodeItem;
+}}
+
+function playEpisode(videoUrl, title) {{
+  if (videoUrl === '#') {{
+    alert('سيتم توفر الحلقة قريبا');
+    return;
+  }}
+  
+  document.getElementById("videoModal").classList.add("active");
+  document.getElementById("videoTitle").textContent = title;
+  
+  if (hls) {{
+    hls.destroy();
+    hls = null;
+  }}
+  
+  if (!videoUrl.startsWith("http")) {{
+    videoUrl = `https://stream.mux.com/${{videoUrl}}.m3u8`;
+  }}
+  
+  const isHLS = videoUrl.endsWith('.m3u8');
+  
+  if (isHLS && Hls.isSupported()) {{
+    hls = new Hls({{ enableWorker: true, lowLatencyMode: true }});
+    hls.loadSource(videoUrl);
+    hls.attachMedia(videoPlayer);
+    hls.on(Hls.Events.MANIFEST_PARSED, function(event, data) {{
+      currentQualityLevels = data.levels;
+      buildQualityMenu();
+      qualityBtn.style.display = 'flex';
+      videoPlayer.play();
+    }});
+  }} else if (isHLS && videoPlayer.canPlayType('application/vnd.apple.mpegurl')) {{
+    videoPlayer.src = videoUrl;
+    videoPlayer.load();
+    videoPlayer.play();
+    qualityBtn.style.display = 'none';
+  }} else {{
+    videoPlayer.src = videoUrl;
+    videoPlayer.load();
+    videoPlayer.play();
+    qualityBtn.style.display = 'none';
+  }}
+  
+  showControls();
+  resetControlsTimer();
+}}
+
+function buildQualityMenu() {{
+  qualityMenu.innerHTML = '';
+  const autoOption = document.createElement('div');
+  autoOption.className = 'quality-option selected';
+  autoOption.textContent = 'تلقائي (Auto)';
+  autoOption.onclick = function() {{
+    if (hls) {{
+      hls.currentLevel = -1;
+      updateQualitySelection(-1);
+      qualityMenu.classList.remove('active');
+    }}
+  }};
+  qualityMenu.appendChild(autoOption);
+  
+  currentQualityLevels.forEach((level, index) => {{
+    const option = document.createElement('div');
+    option.className = 'quality-option';
+    const height = level.height;
+    let qualityName = height + 'p';
+    if (height >= 2160) qualityName = '4K';
+    else if (height >= 1440) qualityName = '2K';
+    else if (height >= 1080) qualityName = '1080p';
+    else if (height >= 720) qualityName = '720p';
+    option.textContent = qualityName;
+    option.onclick = function() {{
+      if (hls) {{
+        hls.currentLevel = index;
+        updateQualitySelection(index);
+        qualityMenu.classList.remove('active');
+      }}
+    }};
+    qualityMenu.appendChild(option);
+  }});
+}}
+
+function updateQualitySelection(selectedIndex) {{
+  const options = qualityMenu.querySelectorAll('.quality-option');
+  options.forEach((option, index) => {{
+    option.classList.remove('selected');
+    if (index === selectedIndex + 1) option.classList.add('selected');
+    else if (selectedIndex === -1 && index === 0) option.classList.add('selected');
+  }});
+}}
+
+qualityBtn.addEventListener('click', function(e) {{
+  e.stopPropagation();
+  qualityMenu.classList.toggle('active');
+  resetControlsTimer();
+}});
+
+// الإعلانات
+fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/videos?api_key=${{API_KEY}}`)
+  .then(res => res.json())
+  .then(data => {{
+    const trailersList = document.getElementById("trailersList");
+    const youtubeTrailers = data.results.filter(v => v.site === "YouTube" && (v.type === "Trailer" || v.type === "Teaser")).slice(0, 3);
+    if (youtubeTrailers.length === 0) {{
+      document.querySelector('.trailers-section').style.display = 'none';
+      return;
+    }}
+    youtubeTrailers.forEach(trailer => {{
+      const el = document.createElement("a");
+      el.href = `https://www.youtube.com/watch?v=${{trailer.key}}`;
+      el.target = "_blank";
+      el.className = "trailer-item";
+      el.innerHTML = `<img src="https://img.youtube.com/vi/${{trailer.key}}/maxresdefault.jpg" alt="${{trailer.name}}" onerror="this.src='https://img.youtube.com/vi/${{trailer.key}}/hqdefault.jpg'"/><i class="fa-solid fa-play"></i>`;
+      trailersList.appendChild(el);
+    }});
+  }});
+
+setTimeout(() => showEpisodes(1), 1000);
+
+watchNowBtn.addEventListener("click", () => {{
+  if (episodeLinks["1-1"]) {{
+    playEpisode(episodeLinks["1-1"], "الموسم 1 - الحلقة 1");
+  }} else {{
+    alert('لا توجد حلقات متاحة للتشغيل');
+  }}
+}});
+
+closeVideoBtn.addEventListener("click", () => {{
+  videoModal.classList.remove("active");
+  videoPlayer.pause();
+  if (hls) {{ hls.destroy(); hls = null; }}
+}});
+
+videoModal.addEventListener("click", (e) => {{
+  if (e.target === videoModal) {{
+    videoModal.classList.remove("active");
+    videoPlayer.pause();
+    if (hls) {{ hls.destroy(); hls = null; }}
+  }}
+}});
+
+function togglePlay(e) {{
+  if (e) e.stopPropagation();
+  if (videoPlayer.paused) {{
+    videoPlayer.play();
+    playPauseIcon.classList.remove("fa-play");
+    playPauseIcon.classList.add("fa-pause");
+  }} else {{
+    videoPlayer.pause();
+    playPauseIcon.classList.remove("fa-pause");
+    playPauseIcon.classList.add("fa-play");
+  }}
+  resetControlsTimer();
+}}
+
+playPauseBtn.addEventListener("click", togglePlay);
+
+videoPlayer.addEventListener("timeupdate", () => {{
+  const currentTime = videoPlayer.currentTime;
+  const duration = videoPlayer.duration;
+  if (isNaN(duration)) return;
+  progressBar.style.width = `${{(currentTime / duration) * 100}}%`;
+  currentTimeDisplay.textContent = formatTime(currentTime);
+  totalTimeDisplay.textContent = formatTime(duration);
+}});
+
+progressContainer.addEventListener("click", (e) => {{
+  e.stopPropagation();
+  const width = progressContainer.offsetWidth;
+  const clickX = e.offsetX;
+  videoPlayer.currentTime = (clickX / width) * videoPlayer.duration;
+  resetControlsTimer();
+}});
+
+function formatTime(time) {{
+  const m = Math.floor(time / 60);
+  const s = Math.floor(time % 60);
+  return `${{m < 10 ? '0' + m : m}}:${{s < 10 ? '0' + s : s}}`;
+}}
+
+fullscreenBtn.addEventListener("click", function(e) {{
+  e.stopPropagation();
+  toggleFullscreen();
+}});
+
+function toggleFullscreen() {{
+  if (!isFullscreen) {{
+    if (videoPlayerWrapper.requestFullscreen) videoPlayerWrapper.requestFullscreen();
+    else if (videoPlayerWrapper.webkitRequestFullscreen) videoPlayerWrapper.webkitRequestFullscreen();
+    videoPlayerWrapper.classList.add("fullscreen");
+    fullscreenBtn.innerHTML = '<i class="fa-solid fa-compress"></i>';
+    isFullscreen = true;
+  }} else {{
+    if (document.exitFullscreen) document.exitFullscreen();
+    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    videoPlayerWrapper.classList.remove("fullscreen");
+    fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
+    isFullscreen = false;
+  }}
+  resetControlsTimer();
+}}
+
+aspectBtn.addEventListener("click", function(e) {{
+  e.stopPropagation();
+  videoPlayer.style.objectFit = videoPlayer.style.objectFit === "cover" ? "contain" : "cover";
+  resetControlsTimer();
+}});
+
+function showControls() {{
+  videoControls.classList.remove('hidden');
+  controlsVisible = true;
+  resetControlsTimer();
+}}
+
+function hideControls() {{
+  if (!videoPlayer.paused) {{
+    videoControls.classList.add('hidden');
+    controlsVisible = false;
+  }}
+}}
+
+function resetControlsTimer() {{
+  clearTimeout(controlsTimeout);
+  controlsTimeout = setTimeout(() => {{
+    if (!videoPlayer.paused) hideControls();
+  }}, 5000);
+}}
+
+videoPlayerWrapper.addEventListener('click', function(e) {{
+  if (e.target.closest('.video-controls')) return;
+  if (controlsVisible) hideControls();
+  else showControls();
+}});
+
+videoPlayerWrapper.addEventListener('mousemove', showControls);
+
+// جلب شعار المسلسل
+fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/images?api_key=${{API_KEY}}`)
+  .then(res => res.json())
+  .then(images => {{
+    const logo = images.logos.find(l => l.iso_639_1 === "en") || images.logos[0];
+    const logoContainer = document.getElementById("seriesLogo");
+    if (logo && logo.file_path) {{
+      logoContainer.innerHTML = `<img src="https://image.tmdb.org/t/p/original${{logo.file_path}}" alt="Series Logo">`;
+    }} else {{
+      logoContainer.style.display = "none";
+    }}
+  }});
+
+// LocalStorage للإعجاب والمشاهدة لاحقًا
+function saveToLocalStorage(key, value) {{
+  try {{ localStorage.setItem(key, JSON.stringify(value)); }} catch(e) {{}}
+}}
+function loadFromLocalStorage(key) {{
+  try {{ return JSON.parse(localStorage.getItem(key)) || null; }} catch(e) {{ return null; }}
+}}
+
+likeBtn.addEventListener('click', () => {{
+  const saved = loadFromLocalStorage('likedSeries') || [];
+  const icon = likeBtn.querySelector('i');
+  if (likeBtn.classList.contains('active')) {{
+    likeBtn.classList.remove('active');
+    icon.classList.replace('fa-solid', 'fa-regular');
+    const idx = saved.indexOf(SERIES_ID);
+    if (idx > -1) saved.splice(idx, 1);
+  }} else {{
+    likeBtn.classList.add('active');
+    icon.classList.replace('fa-regular', 'fa-solid');
+    if (!saved.includes(SERIES_ID)) saved.push(SERIES_ID);
+  }}
+  saveToLocalStorage('likedSeries', saved);
+}});
+
+watchLaterBtn.addEventListener('click', () => {{
+  const saved = loadFromLocalStorage('watchLaterSeries') || [];
+  const icon = watchLaterBtn.querySelector('i');
+  if (watchLaterBtn.classList.contains('active')) {{
+    watchLaterBtn.classList.remove('active');
+    icon.classList.replace('fa-solid', 'fa-regular');
+    const idx = saved.indexOf(SERIES_ID);
+    if (idx > -1) saved.splice(idx, 1);
+  }} else {{
+    watchLaterBtn.classList.add('active');
+    icon.classList.replace('fa-regular', 'fa-solid');
+    if (!saved.includes(SERIES_ID)) saved.push(SERIES_ID);
+  }}
+  saveToLocalStorage('watchLaterSeries', saved);
+}});
+
+document.addEventListener('DOMContentLoaded', () => {{
+  const savedLikes = loadFromLocalStorage('likedSeries') || [];
+  const savedWatchLater = loadFromLocalStorage('watchLaterSeries') || [];
+  if (savedLikes.includes(SERIES_ID)) {{
+    likeBtn.classList.add('active');
+    likeBtn.querySelector('i').classList.replace('fa-regular', 'fa-solid');
+  }}
+  if (savedWatchLater.includes(SERIES_ID)) {{
+    watchLaterBtn.classList.add('active');
+    watchLaterBtn.querySelector('i').classList.replace('fa-regular', 'fa-solid');
+  }}
+}});
+
+document.addEventListener('keydown', function(e) {{
+  if (videoModal.classList.contains('active')) {{
+    if (e.code === 'Space') {{ e.preventDefault(); togglePlay(); }}
+    else if (e.code === 'Escape' && isFullscreen) toggleFullscreen();
+    else if (e.code === 'KeyF') toggleFullscreen();
+    else if (e.code === 'ArrowRight') {{ videoPlayer.currentTime = Math.min(videoPlayer.duration, videoPlayer.currentTime + 10); showControls(); }}
+    else if (e.code === 'ArrowLeft') {{ videoPlayer.currentTime = Math.max(0, videoPlayer.currentTime - 10); showControls(); }}
+  }}
+}});
+</script>
+</body>
+</html>'''
+    return html_template
+
 # ----------------------------- HTML CARD BUILDERS -----------------------------
 def build_card_movie_main(m: dict, tmdb_id: str, mux_id: str = "") -> str:
     poster_w500 = f"https://image.tmdb.org/t/p/w500{m.get('poster_path')}" if m.get("poster_path") else ""
@@ -99,12 +1422,10 @@ def build_card_movie_main(m: dict, tmdb_id: str, mux_id: str = "") -> str:
     
     return f'''<div class="card-wrapper">
 <a class="card" href="{href}">
-<img class="lazy loaded" loading="lazy"
-src="{poster_w500}"
-data-src-original="{poster_orig}">
+<img class="lazy loaded" loading="lazy" src="{poster_w500}" data-src-original="{poster_orig}">
 <div class="card-overlay">
 <i class="fas fa-play play-icon"></i>
-<span class="card-desc">Cinema Plus عالم من المتعة</span>
+<span class="card-desc">Cinema Plus</span>
 </div>
 </a>
 <div class="card-details">
@@ -147,23 +1468,23 @@ def build_card_movie_discover(m: dict, tmdb_id: str, mux_id: str = "") -> str:
 </div>
 </div>'''
 
-def build_card_series_main(s: dict, tmdb_id: str) -> str:
+def build_card_series_main(s: dict, tmdb_id: str, titles: Dict[str, str]) -> str:
     poster_w500 = f"https://image.tmdb.org/t/p/w500{s.get('poster_path')}" if s.get("poster_path") else ""
     poster_orig = f"https://image.tmdb.org/t/p/original{s.get('poster_path')}" if s.get("poster_path") else poster_w500
-    title = s.get("name", "")
+    
+    # استخدام العنوان الأساسي
+    title = titles.get("primary", s.get("name", ""))
     rating = f"{s.get('vote_average', 0):.1f}"
     year = (s.get("first_air_date") or "")[:4] or ""
     
-    href = f"series.html?tmdb={tmdb_id}"
+    href = f"series/{tmdb_id}.html"
 
     return f'''<div class="card-wrapper">
 <a class="card" href="{href}">
-<img class="lazy loaded" loading="lazy"
-src="{poster_w500}"
-data-src-original="{poster_orig}">
+<img class="lazy loaded" loading="lazy" src="{poster_w500}" data-src-original="{poster_orig}">
 <div class="card-overlay">
 <i class="fas fa-play play-icon"></i>
-<span class="card-desc">Cinema Plus عالم من المتعة</span>
+<span class="card-desc">Cinema Plus</span>
 </div>
 </a>
 <div class="card-details">
@@ -178,15 +1499,15 @@ data-src-original="{poster_orig}">
 </div>
 </div>'''
 
-def build_card_series_discover(s: dict, tmdb_id: str) -> str:
+def build_card_series_discover(s: dict, tmdb_id: str, titles: Dict[str, str]) -> str:
     genres = "|".join([g.get("name", "") for g in s.get("genres", [])])
     year = (s.get("first_air_date") or "")[:4] or ""
     poster_w500 = f"https://image.tmdb.org/t/p/w500{s.get('poster_path')}" if s.get("poster_path") else ""
     poster_orig = f"https://image.tmdb.org/t/p/original{s.get('poster_path')}" if s.get("poster_path") else poster_w500
-    title = s.get("name", "").replace('"', "&quot;")
+    title = titles.get("primary", s.get("name", "")).replace('"', "&quot;")
     rating = f"{s.get('vote_average', 0):.1f}"
     
-    href = f"series.html?tmdb={tmdb_id}"
+    href = f"series/{tmdb_id}.html"
 
     return f'''<div class="card-wrapper" data-genre="{genres}" data-year="{year}" data-type="مسلسلات" data-title="{title}">
 <a href="{href}" class="card">
@@ -205,19 +1526,11 @@ def build_card_series_discover(s: dict, tmdb_id: str) -> str:
 
 # ----------------------------- BeautifulSoup HTML HELPERS -----------------------------
 def insert_card_with_bs4(html_content: str, card_html: str, start_marker: str, end_marker: str) -> Optional[str]:
-    """
-    ادراج كارت في HTML باستخدام BeautifulSoup
-    يبحث عن التعليق START ويضيف الكارت بعده مباشرة
-    """
-    # التحقق من وجود الـ markers
     if start_marker not in html_content or end_marker not in html_content:
         logger.error(f"Markers not found: {start_marker}")
         return None
     
-    # استخدام BeautifulSoup لتحليل HTML
     soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # البحث عن التعليق START
     start_comment = None
     for comment in soup.find_all(string=lambda text: isinstance(text, Comment)):
         if start_marker.replace('<!-- ', '').replace(' -->', '').strip() in comment.strip():
@@ -228,7 +1541,6 @@ def insert_card_with_bs4(html_content: str, card_html: str, start_marker: str, e
         logger.error(f"Start comment not found: {start_marker}")
         return None
     
-    # تحليل الكارت الجديد
     new_card_soup = BeautifulSoup(card_html, 'html.parser')
     new_card = new_card_soup.find('div', class_='card-wrapper')
     
@@ -236,35 +1548,23 @@ def insert_card_with_bs4(html_content: str, card_html: str, start_marker: str, e
         logger.error("Could not parse new card HTML")
         return None
     
-    # ادراج الكارت بعد التعليق START مباشرة
     start_comment.insert_after(new_card)
-    
-    # اعادة تنسيق HTML
     return str(soup)
 
 def delete_card_with_bs4(html_content: str, tmdb_id: str, start_marker: str, end_marker: str) -> Optional[str]:
-    """
-    حذف كارت من HTML باستخدام BeautifulSoup
-    يبحث عن الكارت بناءً على TMDB ID ويحذفه بالكامل
-    """
     if start_marker not in html_content or end_marker not in html_content:
         logger.error(f"Markers not found: {start_marker}")
         return None
     
     soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # البحث عن جميع الكاردات
     cards = soup.find_all('div', class_='card-wrapper')
     
     card_found = False
     for card in cards:
-        # البحث عن الرابط داخل الكارت
         link = card.find('a', href=True)
         if link:
             href = link.get('href', '')
-            # التحقق من تطابق TMDB ID
-            if f'tmdb={tmdb_id}' in href or f'go:{tmdb_id}' in href:
-                # حذف الكارت بالكامل
+            if f'tmdb={tmdb_id}' in href or f'/{tmdb_id}.html' in href or f'go:{tmdb_id}' in href:
                 card.decompose()
                 card_found = True
                 logger.info(f"Card with tmdb={tmdb_id} deleted successfully")
@@ -277,13 +1577,9 @@ def delete_card_with_bs4(html_content: str, tmdb_id: str, start_marker: str, end
     return str(soup)
 
 def extract_cards_with_bs4(html_content: str, start_marker: str, end_marker: str, count: int = 5) -> list:
-    """
-    استخراج الكاردات من HTML باستخدام BeautifulSoup
-    """
     if start_marker not in html_content or end_marker not in html_content:
         return []
     
-    # استخراج المحتوى بين الـ markers
     start_idx = html_content.find(start_marker) + len(start_marker)
     end_idx = html_content.find(end_marker)
     section_content = html_content[start_idx:end_idx]
@@ -293,24 +1589,23 @@ def extract_cards_with_bs4(html_content: str, start_marker: str, end_marker: str
     
     result = []
     for card in cards[:count]:
-        # استخراج العنوان
         title_elem = card.find('h3', class_='card-details-title')
         title = title_elem.get_text(strip=True) if title_elem else "بدون عنوان"
         
-        # استخراج الصورة
         img_elem = card.find('img')
         img = img_elem.get('src', '') if img_elem else ""
         
-        # استخراج TMDB ID من الرابط
         link = card.find('a', href=True)
         card_id = ""
         if link:
             href = link.get('href', '')
-            # البحث عن tmdb=XXX او go:XXX
             tmdb_match = re.search(r'tmdb=(\d+)', href)
+            series_match = re.search(r'/(\d+)\.html', href)
             go_match = re.search(r'go:(\d+)', href)
             if tmdb_match:
                 card_id = tmdb_match.group(1)
+            elif series_match:
+                card_id = series_match.group(1)
             elif go_match:
                 card_id = go_match.group(1)
         
@@ -338,14 +1633,16 @@ async def github_get_file(session: aiohttp.ClientSession, path: str) -> Optional
         logger.exception("Error fetching file from GitHub: %s", e)
         return None
 
-async def github_put_file(session: aiohttp.ClientSession, path: str, content_b64: str, sha: str, message: str) -> Optional[dict]:
+async def github_put_file(session: aiohttp.ClientSession, path: str, content_b64: str, sha: Optional[str], message: str) -> Optional[dict]:
     url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}"
     payload = {
         "message": message,
         "content": content_b64,
-        "sha": sha,
         "branch": BRANCH
     }
+    if sha:
+        payload["sha"] = sha
+    
     try:
         async with session.put(url, headers=GITHUB_HEADERS, json=payload, timeout=30) as resp:
             if resp.status in (200, 201):
@@ -360,7 +1657,6 @@ async def github_put_file(session: aiohttp.ClientSession, path: str, content_b64
         return None
 
 async def push_card_to_github(card_html: str, target_file: str, start_marker: str, end_marker: str) -> bool:
-    """ارسال كارت جديد الى GitHub باستخدام BeautifulSoup"""
     async with aiohttp.ClientSession() as session:
         data = await github_get_file(session, target_file)
         if not data:
@@ -384,7 +1680,6 @@ async def push_card_to_github(card_html: str, target_file: str, start_marker: st
         return res is not None
 
 async def delete_card_from_github(tmdb_id: str, target_file: str, start_marker: str, end_marker: str) -> bool:
-    """حذف كارت من GitHub باستخدام BeautifulSoup"""
     async with aiohttp.ClientSession() as session:
         data = await github_get_file(session, target_file)
         if not data:
@@ -408,7 +1703,6 @@ async def delete_card_from_github(tmdb_id: str, target_file: str, start_marker: 
         return res is not None
 
 async def get_cards_from_file(target_file: str, start_marker: str, end_marker: str, count: int = 5) -> list:
-    """جلب الكاردات من ملف GitHub"""
     async with aiohttp.ClientSession() as session:
         data = await github_get_file(session, target_file)
         if not data:
@@ -423,11 +1717,88 @@ async def get_cards_from_file(target_file: str, start_marker: str, end_marker: s
 
         return extract_cards_with_bs4(decoded, start_marker, end_marker, count)
 
+async def upload_series_html(tmdb_id: str, episode_links: Dict[str, str]) -> bool:
+    """رفع ملف HTML للمسلسل إلى GitHub"""
+    html_content = generate_series_html(tmdb_id, episode_links)
+    file_path = f"{SERIES_FOLDER}/{tmdb_id}.html"
+    
+    async with aiohttp.ClientSession() as session:
+        # التحقق من وجود الملف
+        existing = await github_get_file(session, file_path)
+        sha = existing.get("sha") if existing else None
+        
+        content_b64 = base64.b64encode(html_content.encode("utf-8")).decode()
+        res = await github_put_file(session, file_path, content_b64, sha, f"Add/Update series {tmdb_id}")
+        return res is not None
+
+async def get_series_html(tmdb_id: str) -> Optional[str]:
+    """جلب محتوى ملف HTML للمسلسل"""
+    file_path = f"{SERIES_FOLDER}/{tmdb_id}.html"
+    
+    async with aiohttp.ClientSession() as session:
+        data = await github_get_file(session, file_path)
+        if not data:
+            return None
+        
+        encoded = data.get("content", "")
+        try:
+            return base64.b64decode(encoded).decode("utf-8")
+        except Exception as e:
+            logger.exception("Failed to decode series file: %s", e)
+            return None
+
+async def update_series_episodes(tmdb_id: str, episode_links: Dict[str, str]) -> bool:
+    """تحديث روابط الحلقات في ملف المسلسل"""
+    html_content = await get_series_html(tmdb_id)
+    if not html_content:
+        # إنشاء ملف جديد
+        return await upload_series_html(tmdb_id, episode_links)
+    
+    # استخراج الروابط الحالية وإضافة الجديدة
+    current_links = extract_episode_links(html_content)
+    current_links.update(episode_links)
+    
+    # إعادة إنشاء الملف
+    return await upload_series_html(tmdb_id, current_links)
+
+def extract_episode_links(html_content: str) -> Dict[str, str]:
+    """استخراج روابط الحلقات من ملف HTML"""
+    match = re.search(r'const episodeLinks = ({[\s\S]*?});', html_content)
+    if match:
+        try:
+            # تنظيف JSON
+            json_str = match.group(1)
+            # إزالة التعليقات
+            json_str = re.sub(r'//.*', '', json_str)
+            return json.loads(json_str)
+        except:
+            pass
+    return {}
+
+async def list_series_files() -> List[dict]:
+    """جلب قائمة ملفات المسلسلات من GitHub"""
+    url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/{SERIES_FOLDER}?ref={BRANCH}"
+    
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(url, headers=GITHUB_HEADERS, timeout=30) as resp:
+                if resp.status == 200:
+                    files = await resp.json()
+                    series_list = []
+                    for f in files:
+                        if f.get("name", "").endswith(".html"):
+                            tmdb_id = f["name"].replace(".html", "")
+                            series_list.append({"id": tmdb_id, "name": f["name"]})
+                    return series_list
+                return []
+        except Exception as e:
+            logger.exception("Error listing series files: %s", e)
+            return []
+
 # ----------------------------- TELEGRAM HANDLERS -----------------------------
-MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["حذف كارت"]]
+MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "حذف كارت"]]
 
 async def show_main_menu(update: Update):
-    """عرض القائمة الرئيسية"""
     await update.message.reply_text(
         "لوحة تحكم Cinema Plus",
         reply_markup=ReplyKeyboardMarkup(MAIN_KEYBOARD, resize_keyboard=True)
@@ -437,11 +1808,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("غير مصرح لك.")
         return
-
     await show_main_menu(update)
 
 def clean_section_name(section_name: str) -> str:
-    """تنظيف اسم القسم من الايموجي"""
     emojis = ["🆕 ", "🔥 ", "⭐ ", "🎞️ ", "🇮🇶 ", "🇮🇳 ", "🎁 ", "📺 "]
     result = section_name
     for emoji in emojis:
@@ -508,20 +1877,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         card_main = build_card_movie_main(movie, tmdb_id, mux_id)
         card_disc = build_card_movie_discover(movie, tmdb_id, mux_id)
 
-        # تحديد القسم المختار
         clean_section = clean_section_name(section_name)
         section_key = SECTION_MARKERS.get(clean_section, "LATEST")
         
-        logger.info(f"Adding movie to section: {section_name} -> {clean_section} -> {section_key}")
-        
-        # التحقق من وجود الـ markers
         if section_key not in MARKERS:
             await update.message.reply_text(f"القسم '{section_name}' غير موجود في النظام.")
             user_states.pop(uid, None)
             await show_main_menu(update)
             return
 
-        # الاضافة للقسم المختار
         ok_main = await push_card_to_github(card_main, MAIN_FILE, MARKERS[section_key][0], MARKERS[section_key][1])
         ok_disc = await push_card_to_github(card_disc, DISCOVER_FILE, MARKERS["DISCOVER"][0], MARKERS["DISCOVER"][1])
 
@@ -533,22 +1897,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"TMDB ID: {tmdb_id}{mux_info}\n"
                 f"القسم: {section_name}"
             )
-        elif ok_main:
-            await update.message.reply_text(
-                f"تم اضافة الفيلم للصفحة الرئيسية فقط.\n"
-                f"فشل الاضافة لصفحة اكتشف (تحقق من وجود markers)."
-            )
-        elif ok_disc:
-            await update.message.reply_text(
-                f"فشل الاضافة للقسم '{section_name}'.\n"
-                f"تحقق من وجود الـ markers في ملف HTML:\n"
-                f"{MARKERS[section_key][0]}\n{MARKERS[section_key][1]}"
-            )
         else:
-            await update.message.reply_text(
-                f"فشل الاضافة.\n"
-                f"تحقق من وجود الـ markers في ملفات HTML."
-            )
+            await update.message.reply_text("فشل الاضافة. تحقق من الـ markers.")
 
         user_states.pop(uid, None)
         await show_main_menu(update)
@@ -581,56 +1931,434 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("ID غير صحيح")
             return
         tmdb_id = text
-        section_name = state.get("section", "")
         
-        await update.message.reply_text("جاري جلب بيانات المسلسل ورفع الكارت...")
-
+        await update.message.reply_text("جاري جلب بيانات المسلسل...")
+        
         series = await get_series(tmdb_id)
         if not series:
             await update.message.reply_text("فشل جلب بيانات المسلسل من TMDB.")
             user_states.pop(uid, None)
             await show_main_menu(update)
             return
+        
+        # تحديد العناوين
+        titles = determine_title_display(series)
+        if titles.get("secondary") == "FETCH_ARABIC":
+            arabic_title = await fetch_arabic_title(tmdb_id, "tv")
+            if arabic_title and arabic_title != titles["primary"]:
+                titles["secondary"] = arabic_title
+            else:
+                titles["secondary"] = None
+        
+        state["tmdb"] = tmdb_id
+        state["series"] = series
+        state["titles"] = titles
+        state["step"] = "SERIES_SEASONS_COUNT"
+        user_states[uid] = state
+        
+        # عرض معلومات المسلسل
+        poster = f"https://image.tmdb.org/t/p/w500{series.get('poster_path')}" if series.get('poster_path') else None
+        
+        title_display = titles["primary"]
+        if titles.get("secondary"):
+            title_display += f"\n{titles['secondary']}"
+        
+        info_text = (
+            f"المسلسل: {title_display}\n"
+            f"التقييم: {series.get('vote_average', 0):.1f}\n"
+            f"عدد المواسم (TMDB): {series.get('number_of_seasons', 0)}\n"
+            f"اللغة الأصلية: {series.get('original_language', '-')}\n"
+            f"البلد: {', '.join(series.get('origin_country', []))}\n\n"
+            f"كم عدد المواسم التي تريد إضافتها؟"
+        )
+        
+        if poster:
+            await update.message.reply_photo(photo=poster, caption=info_text)
+        else:
+            await update.message.reply_text(info_text)
+        
+        return
 
-        card_main = build_card_series_main(series, tmdb_id)
-        card_disc = build_card_series_discover(series, tmdb_id)
+    if state.get("step") == "SERIES_SEASONS_COUNT":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        
+        seasons_count = int(text)
+        state["seasons_count"] = seasons_count
+        state["current_season"] = 1
+        state["episode_links"] = {}
+        state["step"] = "SERIES_EPISODES_COUNT"
+        user_states[uid] = state
+        
+        await update.message.reply_text(f"الموسم 1:\nكم عدد الحلقات في الموسم 1؟")
+        return
 
-        # تحديد القسم المختار
+    if state.get("step") == "SERIES_EPISODES_COUNT":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        
+        episodes_count = int(text)
+        current_season = state.get("current_season", 1)
+        
+        state["current_episodes_count"] = episodes_count
+        state["current_episode"] = 1
+        state["step"] = "SERIES_EPISODE_LINK"
+        user_states[uid] = state
+        
+        await update.message.reply_text(
+            f"الموسم {current_season} - الحلقة 1:\n"
+            f"ارسل رابط المشاهدة أو Token\n"
+            f"(اكتب 'skip' لتخطي هذه الحلقة)"
+        )
+        return
+
+    if state.get("step") == "SERIES_EPISODE_LINK":
+        current_season = state.get("current_season", 1)
+        current_episode = state.get("current_episode", 1)
+        episodes_count = state.get("current_episodes_count", 1)
+        seasons_count = state.get("seasons_count", 1)
+        
+        # حفظ الرابط
+        if text.lower() != "skip":
+            episode_key = f"{current_season}-{current_episode}"
+            state["episode_links"][episode_key] = text
+        
+        # الانتقال للحلقة التالية
+        if current_episode < episodes_count:
+            state["current_episode"] = current_episode + 1
+            user_states[uid] = state
+            await update.message.reply_text(
+                f"الموسم {current_season} - الحلقة {current_episode + 1}:\n"
+                f"ارسل رابط المشاهدة أو Token\n"
+                f"(اكتب 'skip' لتخطي)"
+            )
+            return
+        
+        # الانتقال للموسم التالي
+        if current_season < seasons_count:
+            state["current_season"] = current_season + 1
+            state["current_episode"] = 1
+            state["step"] = "SERIES_EPISODES_COUNT"
+            user_states[uid] = state
+            await update.message.reply_text(f"الموسم {current_season + 1}:\nكم عدد الحلقات في الموسم {current_season + 1}؟")
+            return
+        
+        # اكتمال جميع المواسم
+        await update.message.reply_text("جاري إنشاء صفحة المسلسل ورفعها...")
+        
+        tmdb_id = state.get("tmdb")
+        series = state.get("series")
+        titles = state.get("titles")
+        section_name = state.get("section", "")
+        episode_links = state.get("episode_links", {})
+        
+        # إنشاء ورفع ملف HTML
+        ok_html = await upload_series_html(tmdb_id, episode_links)
+        
+        # إنشاء الكارت
+        card_main = build_card_series_main(series, tmdb_id, titles)
+        card_disc = build_card_series_discover(series, tmdb_id, titles)
+        
         clean_section = clean_section_name(section_name)
         section_key = SECTION_MARKERS.get(clean_section, "LATEST")
         
-        logger.info(f"Adding series to section: {section_name} -> {clean_section} -> {section_key}")
+        ok_main = await push_card_to_github(card_main, MAIN_FILE, MARKERS[section_key][0], MARKERS[section_key][1])
+        ok_disc = await push_card_to_github(card_disc, DISCOVER_FILE, MARKERS["DISCOVER"][0], MARKERS["DISCOVER"][1])
+        
+        if ok_html and ok_main:
+            title_display = titles["primary"]
+            if titles.get("secondary"):
+                title_display += f" / {titles['secondary']}"
+            
+            await update.message.reply_text(
+                f"تمت العملية بنجاح!\n\n"
+                f"المسلسل: {title_display}\n"
+                f"TMDB ID: {tmdb_id}\n"
+                f"عدد الحلقات المضافة: {len(episode_links)}\n"
+                f"الرابط: series/{tmdb_id}.html"
+            )
+        else:
+            await update.message.reply_text("فشل في بعض العمليات. تحقق من السجلات.")
+        
+        user_states.pop(uid, None)
+        await show_main_menu(update)
+        return
 
-        # التحقق من وجود الـ markers
-        if section_key not in MARKERS:
-            await update.message.reply_text(f"القسم '{section_name}' غير موجود في النظام.")
+    # ===== مراجعة المسلسلات =====
+    if text == "مراجعة المسلسلات":
+        await update.message.reply_text("جاري جلب قائمة المسلسلات...")
+        
+        series_list = await list_series_files()
+        
+        if not series_list:
+            await update.message.reply_text("لا توجد مسلسلات مضافة حاليًا.")
+            await show_main_menu(update)
+            return
+        
+        state["series_list"] = series_list
+        state["step"] = "REVIEW_SELECT"
+        user_states[uid] = state
+        
+        keyboard = []
+        for s in series_list[:20]:  # حد أقصى 20
+            keyboard.append([s["id"]])
+        keyboard.append(["رجوع"])
+        
+        await update.message.reply_text(
+            "اختر المسلسل (TMDB ID):",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+
+    if state.get("step") == "REVIEW_SELECT":
+        if text == "رجوع":
             user_states.pop(uid, None)
             await show_main_menu(update)
             return
-
-        ok_main = await push_card_to_github(card_main, MAIN_FILE, MARKERS[section_key][0], MARKERS[section_key][1])
-        ok_disc = await push_card_to_github(card_disc, DISCOVER_FILE, MARKERS["DISCOVER"][0], MARKERS["DISCOVER"][1])
-
-        if ok_main and ok_disc:
-            await update.message.reply_text(
-                f"تمت العملية بنجاح!\n\n"
-                f"تم اضافة المسلسل: {series.get('name')}\n"
-                f"TMDB ID: {tmdb_id}\n"
-                f"القسم: {section_name}"
-            )
-        elif ok_main:
-            await update.message.reply_text(
-                f"تم اضافة المسلسل للصفحة الرئيسية فقط.\n"
-                f"فشل الاضافة لصفحة اكتشف."
-            )
-        elif ok_disc:
-            await update.message.reply_text(
-                f"فشل الاضافة للقسم '{section_name}'.\n"
-                f"تحقق من وجود الـ markers في ملف HTML."
+        
+        tmdb_id = text
+        
+        await update.message.reply_text("جاري جلب معلومات المسلسل...")
+        
+        series = await get_series(tmdb_id)
+        if not series:
+            await update.message.reply_text("فشل جلب بيانات المسلسل.")
+            return
+        
+        # جلب الروابط الحالية
+        html_content = await get_series_html(tmdb_id)
+        current_links = extract_episode_links(html_content) if html_content else {}
+        
+        state["review_tmdb"] = tmdb_id
+        state["review_series"] = series
+        state["review_links"] = current_links
+        state["step"] = "REVIEW_ACTION"
+        user_states[uid] = state
+        
+        poster = f"https://image.tmdb.org/t/p/w500{series.get('poster_path')}" if series.get('poster_path') else None
+        
+        info_text = (
+            f"المسلسل: {series.get('name')}\n"
+            f"TMDB ID: {tmdb_id}\n"
+            f"عدد الحلقات المضافة: {len(current_links)}\n\n"
+            f"الحلقات الموجودة:\n"
+        )
+        
+        for key in sorted(current_links.keys(), key=lambda x: (int(x.split('-')[0]), int(x.split('-')[1]))):
+            s, e = key.split('-')
+            info_text += f"S{s} E{e}: موجود\n"
+        
+        keyboard = [
+            ["اضافة حلقة جديدة", "اضافة موسم جديد"],
+            ["تعديل رابط حلقة", "حذف حلقة"],
+            ["رجوع"]
+        ]
+        
+        if poster:
+            await update.message.reply_photo(
+                photo=poster,
+                caption=info_text[:1000],
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
             )
         else:
-            await update.message.reply_text("فشل الاضافة. تحقق من الـ markers.")
+            await update.message.reply_text(
+                info_text,
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+        return
 
+    if state.get("step") == "REVIEW_ACTION":
+        if text == "رجوع":
+            user_states.pop(uid, None)
+            await show_main_menu(update)
+            return
+        
+        if text == "اضافة حلقة جديدة":
+            state["step"] = "ADD_EPISODE_SEASON"
+            user_states[uid] = state
+            await update.message.reply_text("ارسل رقم الموسم:", reply_markup=ReplyKeyboardRemove())
+            return
+        
+        if text == "اضافة موسم جديد":
+            state["step"] = "ADD_SEASON_NUMBER"
+            user_states[uid] = state
+            await update.message.reply_text("ارسل رقم الموسم الجديد:", reply_markup=ReplyKeyboardRemove())
+            return
+        
+        if text == "تعديل رابط حلقة":
+            state["step"] = "EDIT_EPISODE_KEY"
+            user_states[uid] = state
+            await update.message.reply_text(
+                "ارسل مفتاح الحلقة (مثال: 1-5 للموسم 1 الحلقة 5):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return
+        
+        if text == "حذف حلقة":
+            state["step"] = "DELETE_EPISODE_KEY"
+            user_states[uid] = state
+            await update.message.reply_text(
+                "ارسل مفتاح الحلقة للحذف (مثال: 1-5):",
+                reply_markup=ReplyKeyboardRemove()
+            )
+            return
+
+    # اضافة حلقة جديدة
+    if state.get("step") == "ADD_EPISODE_SEASON":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        state["add_season"] = int(text)
+        state["step"] = "ADD_EPISODE_NUMBER"
+        user_states[uid] = state
+        await update.message.reply_text("ارسل رقم الحلقة:")
+        return
+
+    if state.get("step") == "ADD_EPISODE_NUMBER":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        state["add_episode"] = int(text)
+        state["step"] = "ADD_EPISODE_LINK"
+        user_states[uid] = state
+        await update.message.reply_text("ارسل رابط المشاهدة أو Token:")
+        return
+
+    if state.get("step") == "ADD_EPISODE_LINK":
+        season = state.get("add_season")
+        episode = state.get("add_episode")
+        tmdb_id = state.get("review_tmdb")
+        
+        episode_key = f"{season}-{episode}"
+        new_links = {episode_key: text}
+        
+        await update.message.reply_text("جاري تحديث الملف...")
+        
+        ok = await update_series_episodes(tmdb_id, new_links)
+        
+        if ok:
+            await update.message.reply_text(f"تمت اضافة الحلقة S{season} E{episode} بنجاح!")
+        else:
+            await update.message.reply_text("فشل في تحديث الملف.")
+        
+        user_states.pop(uid, None)
+        await show_main_menu(update)
+        return
+
+    # اضافة موسم جديد
+    if state.get("step") == "ADD_SEASON_NUMBER":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        state["new_season"] = int(text)
+        state["step"] = "ADD_SEASON_EPISODES_COUNT"
+        user_states[uid] = state
+        await update.message.reply_text(f"كم عدد حلقات الموسم {text}؟")
+        return
+
+    if state.get("step") == "ADD_SEASON_EPISODES_COUNT":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        
+        state["new_season_episodes"] = int(text)
+        state["new_season_current"] = 1
+        state["new_season_links"] = {}
+        state["step"] = "ADD_SEASON_EPISODE_LINK"
+        user_states[uid] = state
+        
+        season = state.get("new_season")
+        await update.message.reply_text(f"الموسم {season} - الحلقة 1:\nارسل الرابط أو Token (او 'skip'):")
+        return
+
+    if state.get("step") == "ADD_SEASON_EPISODE_LINK":
+        season = state.get("new_season")
+        current = state.get("new_season_current")
+        total = state.get("new_season_episodes")
+        
+        if text.lower() != "skip":
+            state["new_season_links"][f"{season}-{current}"] = text
+        
+        if current < total:
+            state["new_season_current"] = current + 1
+            user_states[uid] = state
+            await update.message.reply_text(f"الموسم {season} - الحلقة {current + 1}:\nارسل الرابط أو Token (او 'skip'):")
+            return
+        
+        # اكتمال الموسم
+        tmdb_id = state.get("review_tmdb")
+        new_links = state.get("new_season_links", {})
+        
+        await update.message.reply_text("جاري تحديث الملف...")
+        
+        ok = await update_series_episodes(tmdb_id, new_links)
+        
+        if ok:
+            await update.message.reply_text(f"تمت اضافة الموسم {season} بنجاح! ({len(new_links)} حلقة)")
+        else:
+            await update.message.reply_text("فشل في تحديث الملف.")
+        
+        user_states.pop(uid, None)
+        await show_main_menu(update)
+        return
+
+    # تعديل رابط حلقة
+    if state.get("step") == "EDIT_EPISODE_KEY":
+        if not re.match(r'^\d+-\d+$', text):
+            await update.message.reply_text("صيغة غير صحيحة. استخدم: رقم_الموسم-رقم_الحلقة")
+            return
+        state["edit_key"] = text
+        state["step"] = "EDIT_EPISODE_LINK"
+        user_states[uid] = state
+        await update.message.reply_text("ارسل الرابط الجديد:")
+        return
+
+    if state.get("step") == "EDIT_EPISODE_LINK":
+        edit_key = state.get("edit_key")
+        tmdb_id = state.get("review_tmdb")
+        
+        await update.message.reply_text("جاري تحديث الملف...")
+        
+        ok = await update_series_episodes(tmdb_id, {edit_key: text})
+        
+        if ok:
+            await update.message.reply_text(f"تم تحديث رابط الحلقة {edit_key} بنجاح!")
+        else:
+            await update.message.reply_text("فشل في تحديث الملف.")
+        
+        user_states.pop(uid, None)
+        await show_main_menu(update)
+        return
+
+    # حذف حلقة
+    if state.get("step") == "DELETE_EPISODE_KEY":
+        if not re.match(r'^\d+-\d+$', text):
+            await update.message.reply_text("صيغة غير صحيحة. استخدم: رقم_الموسم-رقم_الحلقة")
+            return
+        
+        delete_key = text
+        tmdb_id = state.get("review_tmdb")
+        
+        # جلب الروابط الحالية وحذف الحلقة
+        html_content = await get_series_html(tmdb_id)
+        current_links = extract_episode_links(html_content) if html_content else {}
+        
+        if delete_key in current_links:
+            del current_links[delete_key]
+            
+            await update.message.reply_text("جاري تحديث الملف...")
+            
+            ok = await upload_series_html(tmdb_id, current_links)
+            
+            if ok:
+                await update.message.reply_text(f"تم حذف الحلقة {delete_key} بنجاح!")
+            else:
+                await update.message.reply_text("فشل في تحديث الملف.")
+        else:
+            await update.message.reply_text(f"الحلقة {delete_key} غير موجودة.")
+        
         user_states.pop(uid, None)
         await show_main_menu(update)
         return
@@ -669,18 +2397,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await show_main_menu(update)
                 return
             
-            user_states[uid] = {"step": "DELETE_DISCOVER_SELECT", "cards": cards, "page": "discover"}
+            user_states[uid] = {"step": "DELETE_DISCOVER_SELECT", "cards": cards}
             
             keyboard = []
-            for i, card in enumerate(cards, 1):
+            for card in cards:
                 try:
                     if card['img']:
-                        await update.message.reply_photo(
-                            photo=card['img'],
-                            caption=f"{card['title']}\nID: {card['id']}"
-                        )
+                        await update.message.reply_photo(photo=card['img'], caption=f"{card['title']}\nID: {card['id']}")
                 except Exception as e:
-                    logger.warning(f"Failed to send photo: {e}")
                     await update.message.reply_text(f"{card['title']}\nID: {card['id']}")
                 keyboard.append([f"حذف: {card['title'][:20]}... ({card['id']})"])
             
@@ -712,18 +2436,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_main_menu(update)
             return
         
-        user_states[uid] = {"step": "DELETE_MAIN_SELECT", "cards": cards, "section": section_name, "section_key": section_key, "page": "main"}
+        user_states[uid] = {"step": "DELETE_MAIN_SELECT", "cards": cards, "section": section_name, "section_key": section_key}
         
         keyboard = []
-        for i, card in enumerate(cards, 1):
+        for card in cards:
             try:
                 if card['img']:
-                    await update.message.reply_photo(
-                        photo=card['img'],
-                        caption=f"{card['title']}\nID: {card['id']}"
-                    )
+                    await update.message.reply_photo(photo=card['img'], caption=f"{card['title']}\nID: {card['id']}")
             except Exception as e:
-                logger.warning(f"Failed to send photo: {e}")
                 await update.message.reply_text(f"{card['title']}\nID: {card['id']}")
             keyboard.append([f"حذف: {card['title'][:20]}... ({card['id']})"])
         
@@ -731,7 +2451,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("اختر الكارت الذي تريد حذفه:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
         return
 
-    # معالجة اختيار الحذف من الصفحة الرئيسية
     if state.get("step") == "DELETE_MAIN_SELECT":
         if text == "رجوع":
             keyboard = [
@@ -745,7 +2464,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_states[uid] = {"step": "DELETE_MAIN_SECTION"}
             return
         
-        # استخراج ID من النص
         id_match = re.search(r'\((\d+)\)$', text)
         if not id_match:
             await update.message.reply_text("لم يتم العثور على ID صحيح.")
@@ -760,20 +2478,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await delete_card_from_github(card_id, MAIN_FILE, MARKERS[section_key][0], MARKERS[section_key][1])
         
         if ok:
-            await update.message.reply_text(
-                f"تمت العملية بنجاح!\n\n"
-                f"تم حذف الكارت من الصفحة الرئيسية\n"
-                f"ID: {card_id}\n"
-                f"القسم: {section_name}"
-            )
+            await update.message.reply_text(f"تم حذف الكارت من {section_name}\nID: {card_id}")
         else:
-            await update.message.reply_text("فشل حذف الكارت. قد يكون غير موجود.")
+            await update.message.reply_text("فشل حذف الكارت.")
         
         user_states.pop(uid, None)
         await show_main_menu(update)
         return
 
-    # معالجة اختيار الحذف من صفحة اكتشف
     if state.get("step") == "DELETE_DISCOVER_SELECT":
         if text == "رجوع":
             keyboard = [["الصفحة الرئيسية", "صفحة اكتشف"], ["رجوع"]]
@@ -781,7 +2493,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             user_states[uid] = {"step": "DELETE_CHOOSE_PAGE"}
             return
         
-        # استخراج ID من النص
         id_match = re.search(r'\((\d+)\)$', text)
         if not id_match:
             await update.message.reply_text("لم يتم العثور على ID صحيح.")
@@ -794,13 +2505,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await delete_card_from_github(card_id, DISCOVER_FILE, MARKERS["DISCOVER"][0], MARKERS["DISCOVER"][1])
         
         if ok:
-            await update.message.reply_text(
-                f"تمت العملية بنجاح!\n\n"
-                f"تم حذف الكارت من صفحة اكتشف\n"
-                f"ID: {card_id}"
-            )
+            await update.message.reply_text(f"تم حذف الكارت من صفحة اكتشف\nID: {card_id}")
         else:
-            await update.message.reply_text("فشل حذف الكارت. قد يكون غير موجود.")
+            await update.message.reply_text("فشل حذف الكارت.")
         
         user_states.pop(uid, None)
         await show_main_menu(update)
@@ -811,9 +2518,8 @@ def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Bot started with BeautifulSoup HTML parser")
+    logger.info("Bot started with Series Management")
     app.run_polling()
 
 if __name__ == "__main__":
     main()
-
