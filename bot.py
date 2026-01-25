@@ -69,6 +69,41 @@ ASIAN_LANGUAGES = ['ja', 'ko', 'zh', 'th', 'vi', 'id', 'ms', 'tl', 'hi', 'ta', '
 TURKISH_COUNTRIES = ['TR']
 TURKISH_LANGUAGES = ['tr']
 
+# ----------------------------- GENRE TRANSLATIONS -----------------------------
+GENRE_TRANSLATIONS = {
+    "Action": "اكشن",
+    "Adventure": "مغامرة",
+    "Animation": "رسوم متحركة",
+    "Comedy": "كوميديا",
+    "Crime": "جريمة",
+    "Documentary": "وثائقي",
+    "Drama": "دراما",
+    "Family": "عائلي",
+    "Fantasy": "فانتازيا",
+    "History": "تاريخي",
+    "Horror": "رعب",
+    "Music": "موسيقي",
+    "Mystery": "غموض",
+    "Romance": "رومانسي",
+    "Science Fiction": "خيال علمي",
+    "Sci-Fi & Fantasy": "خيال علمي وفانتازيا",
+    "TV Movie": "فيلم تلفزيوني",
+    "Thriller": "اثارة",
+    "War": "حرب",
+    "Western": "غربي",
+    "Action & Adventure": "اكشن ومغامرة",
+    "Kids": "اطفال",
+    "News": "اخبار",
+    "Reality": "واقعي",
+    "Soap": "مسلسل درامي",
+    "Talk": "حواري",
+    "War & Politics": "حرب وسياسة"
+}
+
+def translate_genre(genre_name: str) -> str:
+    """ترجمة تصنيف واحد من الإنجليزية إلى العربية"""
+    return GENRE_TRANSLATIONS.get(genre_name, genre_name)
+
 # ----------------------------- LOGGING -----------------------------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -917,11 +952,14 @@ function determineTitleDisplay(data, arabicData) {{
 }}
 
 let currentSeason = 1;
-let isFullscreen = false;
-let controlsVisible = true;
-let controlsTimeout;
-let hls = null;
-let currentQualityLevels = [];
+  let isFullscreen = false;
+  let controlsVisible = true;
+  let controlsTimeout;
+  let hls = null;
+  let currentQualityLevels = [];
+  let seriesPosterUrl = ''; // متغير لحفظ صورة البوستر
+  let currentAspectMode = 0; // لتتبع وضع العرض الحالي
+  const aspectModes = ['contain', 'cover', 'fill']; // أوضاع العرض المختلفة
 
 const videoModal = document.getElementById("videoModal");
 const watchNowBtn = document.getElementById("watchNowBtn");
@@ -972,17 +1010,50 @@ Promise.all([
   
   // جلب صورة البوستر
   fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/images?api_key=${{API_KEY}}`)
-    .then(res => res.json())
-    .then(images => {{
-      const cleanPoster = images.posters.find(p => p.iso_639_1 === null);
-      const imagePath = cleanPoster ? cleanPoster.file_path : enData.poster_path;
-      if (imagePath) {{
-        document.getElementById("moviePage").style.backgroundImage = `url(https://image.tmdb.org/t/p/original${{imagePath}})`;
-      }}
-    }});
+  .then(res => res.json())
+  .then(images => {{
+  const cleanPoster = images.posters.find(p => p.iso_639_1 === null);
+  const imagePath = cleanPoster ? cleanPoster.file_path : enData.poster_path;
+  if (imagePath) {{
+  document.getElementById("moviePage").style.backgroundImage = `url(https://image.tmdb.org/t/p/original${{imagePath}})`;
+  // حفظ رابط البوستر لاستخدامه في المشغل
+  seriesPosterUrl = `https://image.tmdb.org/t/p/w780${{imagePath}}`;
+  }}
+  }});
   
   document.getElementById("imdbRating").textContent = enData.vote_average.toFixed(1);
-  const genres = enData.genres.map(g => g.name).join(" . ");
+  
+  // ترجمة التصنيفات إلى العربية
+  const genreTranslations = {{
+    "Action": "اكشن",
+    "Adventure": "مغامرة",
+    "Animation": "رسوم متحركة",
+    "Comedy": "كوميديا",
+    "Crime": "جريمة",
+    "Documentary": "وثائقي",
+    "Drama": "دراما",
+    "Family": "عائلي",
+    "Fantasy": "فانتازيا",
+    "History": "تاريخي",
+    "Horror": "رعب",
+    "Music": "موسيقي",
+    "Mystery": "غموض",
+    "Romance": "رومانسي",
+    "Science Fiction": "خيال علمي",
+    "Sci-Fi & Fantasy": "خيال علمي وفانتازيا",
+    "TV Movie": "فيلم تلفزيوني",
+    "Thriller": "اثارة",
+    "War": "حرب",
+    "Western": "غربي",
+    "Action & Adventure": "اكشن ومغامرة",
+    "Kids": "اطفال",
+    "News": "اخبار",
+    "Reality": "واقعي",
+    "Soap": "مسلسل درامي",
+    "Talk": "حواري",
+    "War & Politics": "حرب وسياسة"
+  }};
+  const genres = enData.genres.map(g => genreTranslations[g.name] || g.name).join(" . ");
   document.getElementById("yearGenre").textContent = `${{enData.first_air_date.slice(0,4)}} . ${{genres}}`;
   document.getElementById("seasons").textContent = `${{enData.number_of_seasons}} مواسم . ${{enData.number_of_episodes}} حلقة`;
   document.getElementById("overview").textContent = arData.overview || enData.overview;
