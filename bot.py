@@ -256,21 +256,6 @@ def generate_series_html(tmdb_id: str, episode_links: Dict[str, str]) -> str:
     opacity: 0.9;
     margin-bottom: 15px;
   }}
-  .title-section {{
-    text-align: center;
-    margin-bottom: 10px;
-  }}
-  .primary-title {{
-    font-size: 1.8rem;
-    font-weight: bold;
-    color: #fff;
-    margin-bottom: 5px;
-  }}
-  .secondary-title {{
-    font-size: 1.2rem;
-    color: #aaa;
-    font-weight: normal;
-  }}
   .imdb {{
     display: flex;
     align-items: center;
@@ -815,10 +800,6 @@ def generate_series_html(tmdb_id: str, episode_links: Dict[str, str]) -> str:
 <div class="content">
   <div class="meta">
     <div class="tmdb-logo" id="seriesLogo"></div>
-    <div class="title-section">
-      <div class="primary-title" id="primaryTitle"></div>
-      <div class="secondary-title" id="secondaryTitle"></div>
-    </div>
     <div class="imdb">
       <img src="https://upload.wikimedia.org/wikipedia/commons/6/69/IMDB_Logo_2016.svg" alt="IMDb">
       <span id="imdbRating">0.0</span>
@@ -1001,13 +982,6 @@ Promise.all([
 ]).then(([enData, arData]) => {{
   const titles = determineTitleDisplay(enData, arData);
   
-  document.getElementById("primaryTitle").textContent = titles.primary;
-  if (titles.secondary) {{
-    document.getElementById("secondaryTitle").textContent = titles.secondary;
-  }} else {{
-    document.getElementById("secondaryTitle").style.display = 'none';
-  }}
-  
   // جلب صورة البوستر
   fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/images?api_key=${{API_KEY}}`)
   .then(res => res.json())
@@ -1171,6 +1145,11 @@ function playEpisode(videoUrl, title) {{
   
   document.getElementById("videoModal").classList.add("active");
   document.getElementById("videoTitle").textContent = title;
+  
+  // تعيين صورة البوستر كخلفية قبل التشغيل
+  if (seriesPosterUrl) {{
+    videoPlayer.poster = seriesPosterUrl;
+  }}
   
   if (hls) {{
     hls.destroy();
