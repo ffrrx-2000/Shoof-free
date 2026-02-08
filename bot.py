@@ -982,7 +982,7 @@ Promise.all([
 ]).then(([enData, arData]) => {{
   const titles = determineTitleDisplay(enData, arData);
   
-  // جلب صورة البوستر
+  // جلب صورة البوستر للخلفية
   fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/images?api_key=${{API_KEY}}`)
   .then(res => res.json())
   .then(images => {{
@@ -990,10 +990,16 @@ Promise.all([
   const imagePath = cleanPoster ? cleanPoster.file_path : enData.poster_path;
   if (imagePath) {{
   document.getElementById("moviePage").style.backgroundImage = `url(https://image.tmdb.org/t/p/original${{imagePath}})`;
-  // حفظ رابط البوستر لاستخدامه في المشغل
-  seriesPosterUrl = `https://image.tmdb.org/t/p/w780${{imagePath}}`;
   }}
   }});
+
+  // حفظ صورة الخلفية الأفقية (backdrop) لاستخدامها في المشغل
+  const backdropPath = enData.backdrop_path;
+  if (backdropPath) {{
+    seriesPosterUrl = `https://image.tmdb.org/t/p/w1280${{backdropPath}}`;
+  }} else if (enData.poster_path) {{
+    seriesPosterUrl = `https://image.tmdb.org/t/p/w780${{enData.poster_path}}`;
+  }}
   
   document.getElementById("imdbRating").textContent = enData.vote_average.toFixed(1);
   
@@ -1846,7 +1852,7 @@ async def list_series_files() -> List[dict]:
             return []
 
 # ----------------------------- TELEGRAM HANDLERS -----------------------------
-MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "حذف كارت"]]
+MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "تعديل المسلسلات"], ["حذف كارت"]]
 
 async def show_main_menu(update: Update):
     await update.message.reply_text(
@@ -1939,13 +1945,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok_main = await push_card_to_github(card_main, MAIN_FILE, MARKERS[section_key][0], MARKERS[section_key][1])
         ok_disc = await push_card_to_github(card_disc, DISCOVER_FILE, MARKERS["DISCOVER"][0], MARKERS["DISCOVER"][1])
 
+        # اضافة تلقائية في قسم الاضافات الأخيرة إذا لم يكن القسم المختار هو نفسه
+        ok_latest = True
+        if section_key != "LATEST":
+            ok_latest = await push_card_to_github(card_main, MAIN_FILE, MARKERS["LATEST"][0], MARKERS["LATEST"][1])
+
         if ok_main and ok_disc:
             mux_info = f"\nMUX ID: {mux_id}" if mux_id else ""
+            latest_info = ""
+            if section_key != "LATEST":
+                latest_info = f"\n- الاضافات الأخيرة: {'نعم' if ok_latest else 'لا'}"
             await update.message.reply_text(
                 f"تمت العملية بنجاح!\n\n"
                 f"تم اضافة الفيلم: {movie.get('title')}\n"
                 f"TMDB ID: {tmdb_id}{mux_info}\n"
-                f"القسم: {section_name}"
+                f"القسم: {section_name}{latest_info}"
             )
         else:
             await update.message.reply_text("فشل الاضافة. تحقق من الـ markers.")
@@ -2210,9 +2224,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update)
         return
 
-    # ===== مراجعة المسلسلات =====
+    # ===== مراجعة المسلسلات (المستمرة فقط) =====
     if text == "مراجعة المسلسلات":
-        await update.message.reply_text("جاري جلب قائمة المسلسلات...")
+        await update.message.reply_text("جاري جلب قائمة المسلسلات المستمرة...")
         
         series_list = await list_series_files()
         
@@ -2221,21 +2235,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await show_main_menu(update)
             return
         
-        # جلب معلومات كل مسلسل من TMDB
+        # جلب معلومات كل مسلسل من TMDB وفلترة المستمرة فقط
         enriched_list = []
-        for s in series_list[:15]:  # حد أقصى 15
+        for s in series_list[:20]:  # حد أقصى 20
             series_data = await get_series(s["id"])
             if series_data:
+                # فلترة: فقط المسلسلات المستمرة (غير المنتهية)
+                status = series_data.get("status", "")
+                # Returning Series = مستمر، In Production = قيد الإنتاج
+                if status in ["Returning Series", "In Production", "Planned"]:
+                    enriched_list.append({
+                        "id": s["id"],
+                        "name": series_data.get("name", "بدون اسم"),
+                        "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
+                        "status": status
+                    })
+        
+        if not enriched_list:
+            await update.message.reply_text("لا توجد مسلسلات مستمرة تحتاج مراجعة.\nجميع المسلسلات المضافة منتهية.")
+            await show_main_menu(update)
+            return
+        
+        state["series_list"] = enriched_list
+        state["step"] = "REVIEW_SELECT"
+        user_states[uid] = state
+        
+        # عرض المسلسلات مع الصور
+        keyboard = []
+        for s in enriched_list:
+            try:
+                if s['poster']:
+                    await update.message.reply_photo(
+                        photo=s['poster'],
+                        caption=f"{s['name']}\nID: {s['id']}\nالحالة: مستمر"
+                    )
+                else:
+                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}\nالحالة: مستمر")
+            except Exception as e:
+                await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
+            
+            # إضافة زر للاختيار
+            keyboard.append([f"{s['name'][:25]} ({s['id']})"])
+        
+        keyboard.append(["رجوع"])
+        
+        await update.message.reply_text(
+            "اختر المسلسل المستمر لمراجعته:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+
+    # ===== تعديل المسلسلات (جميع المسلسلات) =====
+    if text == "تعديل المسلسلات":
+        await update.message.reply_text("جاري جلب قائمة جميع المسلسلات...")
+        
+        series_list = await list_series_files()
+        
+        if not series_list:
+            await update.message.reply_text("لا توجد مسلسلات مضافة حاليًا.")
+            await show_main_menu(update)
+            return
+        
+        # جلب معلومات كل مسلسل من TMDB (جميعها)
+        enriched_list = []
+        for s in series_list[:20]:  # حد أقصى 20
+            series_data = await get_series(s["id"])
+            if series_data:
+                status = series_data.get("status", "")
+                status_ar = "مستمر" if status in ["Returning Series", "In Production"] else "منتهي"
                 enriched_list.append({
                     "id": s["id"],
                     "name": series_data.get("name", "بدون اسم"),
-                    "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None
+                    "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
+                    "status_ar": status_ar
                 })
             else:
                 enriched_list.append({
                     "id": s["id"],
                     "name": f"مسلسل {s['id']}",
-                    "poster": None
+                    "poster": None,
+                    "status_ar": "غير معروف"
                 })
         
         state["series_list"] = enriched_list
@@ -2249,10 +2328,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if s['poster']:
                     await update.message.reply_photo(
                         photo=s['poster'],
-                        caption=f"{s['name']}\nID: {s['id']}"
+                        caption=f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}"
                     )
                 else:
-                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
+                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}")
             except Exception as e:
                 await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
             
@@ -2262,7 +2341,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(["رجوع"])
         
         await update.message.reply_text(
-            "اختر المسلسل:",
+            "اختر المسلسل للتعديل:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return
