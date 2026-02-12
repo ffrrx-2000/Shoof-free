@@ -1334,14 +1334,28 @@ fullscreenBtn.addEventListener("click", function(e) {{
 
 function toggleFullscreen() {{
   if (!isFullscreen) {{
-    if (videoPlayerWrapper.requestFullscreen) videoPlayerWrapper.requestFullscreen();
-    else if (videoPlayerWrapper.webkitRequestFullscreen) videoPlayerWrapper.webkitRequestFullscreen();
+    if (videoPlayerWrapper.requestFullscreen) {{
+      videoPlayerWrapper.requestFullscreen();
+    }} else if (videoPlayerWrapper.mozRequestFullScreen) {{
+      videoPlayerWrapper.mozRequestFullScreen();
+    }} else if (videoPlayerWrapper.webkitRequestFullscreen) {{
+      videoPlayerWrapper.webkitRequestFullscreen();
+    }} else if (videoPlayerWrapper.msRequestFullscreen) {{
+      videoPlayerWrapper.msRequestFullscreen();
+    }}
     videoPlayerWrapper.classList.add("fullscreen");
     fullscreenBtn.innerHTML = '<i class="fa-solid fa-compress"></i>';
     isFullscreen = true;
   }} else {{
-    if (document.exitFullscreen) document.exitFullscreen();
-    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+    if (document.exitFullscreen) {{
+      document.exitFullscreen();
+    }} else if (document.mozCancelFullScreen) {{
+      document.mozCancelFullScreen();
+    }} else if (document.webkitExitFullscreen) {{
+      document.webkitExitFullscreen();
+    }} else if (document.msExitFullscreen) {{
+      document.msExitFullscreen();
+    }}
     videoPlayerWrapper.classList.remove("fullscreen");
     fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
     isFullscreen = false;
@@ -1382,6 +1396,49 @@ videoPlayerWrapper.addEventListener('click', function(e) {{
 }});
 
 videoPlayerWrapper.addEventListener('mousemove', showControls);
+
+videoPlayerWrapper.addEventListener('touchstart', function(e) {{
+  if (e.target.closest('.video-controls')) return;
+  if (controlsVisible) hideControls();
+  else showControls();
+}});
+
+videoControls.addEventListener('mousemove', function(e) {{
+  e.stopPropagation();
+  resetControlsTimer();
+}});
+
+videoControls.addEventListener('click', function(e) {{
+  e.stopPropagation();
+  resetControlsTimer();
+}});
+
+videoPlayer.addEventListener('play', function() {{
+  resetControlsTimer();
+}});
+
+document.addEventListener('fullscreenchange', handleFullscreenChange);
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+
+function handleFullscreenChange() {{
+  if (!document.fullscreenElement && 
+      !document.webkitFullscreenElement && 
+      !document.mozFullScreenElement && 
+      !document.msFullscreenElement) {{
+    videoPlayerWrapper.classList.remove("fullscreen");
+    fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
+    isFullscreen = false;
+    showControls();
+  }}
+}}
+
+document.addEventListener('click', function(e) {{
+  if (!qualityBtn.contains(e.target) && !qualityMenu.contains(e.target)) {{
+    qualityMenu.classList.remove('active');
+  }}
+}});
 
 // جلب شعار المسلسل
 fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}/images?api_key=${{API_KEY}}`)
