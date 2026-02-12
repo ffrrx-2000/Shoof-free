@@ -718,6 +718,10 @@ def generate_series_html(tmdb_id: str, episode_links: Dict[str, str]) -> str:
     object-fit: cover;
   }}
 
+  .video-player-wrapper.fullscreen .video-controls {{
+    opacity: 1;
+    pointer-events: auto;
+  }}
   .video-controls.hidden {{
     opacity: 0 !important;
     pointer-events: none !important;
@@ -1343,9 +1347,11 @@ function toggleFullscreen() {{
     }} else if (videoPlayerWrapper.msRequestFullscreen) {{
       videoPlayerWrapper.msRequestFullscreen();
     }}
+    
     videoPlayerWrapper.classList.add("fullscreen");
     fullscreenBtn.innerHTML = '<i class="fa-solid fa-compress"></i>';
     isFullscreen = true;
+    
   }} else {{
     if (document.exitFullscreen) {{
       document.exitFullscreen();
@@ -1356,18 +1362,44 @@ function toggleFullscreen() {{
     }} else if (document.msExitFullscreen) {{
       document.msExitFullscreen();
     }}
+    
     videoPlayerWrapper.classList.remove("fullscreen");
     fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
     isFullscreen = false;
   }}
+  
   resetControlsTimer();
 }}
 
 aspectBtn.addEventListener("click", function(e) {{
   e.stopPropagation();
-  videoPlayer.style.objectFit = videoPlayer.style.objectFit === "cover" ? "contain" : "cover";
+  if (videoPlayer.style.objectFit === "cover") {{
+    videoPlayer.style.objectFit = "contain";
+    aspectBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
+  }} else {{
+    videoPlayer.style.objectFit = "cover";
+    aspectBtn.innerHTML = '<i class="fa-solid fa-tv"></i>';
+  }}
   resetControlsTimer();
 }});
+
+document.addEventListener('fullscreenchange', handleFullscreenChange);
+document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+document.addEventListener('MSFullscreenChange', handleFullscreenChange);
+
+function handleFullscreenChange() {{
+  if (!document.fullscreenElement && 
+      !document.webkitFullscreenElement && 
+      !document.mozFullScreenElement && 
+      !document.msFullscreenElement) {{
+    
+    videoPlayerWrapper.classList.remove("fullscreen");
+    fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
+    isFullscreen = false;
+    showControls();
+  }}
+}}
 
 function showControls() {{
   videoControls.classList.remove('hidden');
@@ -1385,22 +1417,38 @@ function hideControls() {{
 function resetControlsTimer() {{
   clearTimeout(controlsTimeout);
   controlsTimeout = setTimeout(() => {{
-    if (!videoPlayer.paused) hideControls();
+    if (!videoPlayer.paused) {{
+      hideControls();
+    }}
   }}, 5000);
 }}
 
 videoPlayerWrapper.addEventListener('click', function(e) {{
-  if (e.target.closest('.video-controls')) return;
-  if (controlsVisible) hideControls();
-  else showControls();
+  if (e.target.closest('.video-controls')) {{
+    return;
+  }}
+  
+  if (controlsVisible) {{
+    hideControls();
+  }} else {{
+    showControls();
+  }}
 }});
 
-videoPlayerWrapper.addEventListener('mousemove', showControls);
+videoPlayerWrapper.addEventListener('mousemove', function() {{
+  showControls();
+}});
 
 videoPlayerWrapper.addEventListener('touchstart', function(e) {{
-  if (e.target.closest('.video-controls')) return;
-  if (controlsVisible) hideControls();
-  else showControls();
+  if (e.target.closest('.video-controls')) {{
+    return;
+  }}
+  
+  if (controlsVisible) {{
+    hideControls();
+  }} else {{
+    showControls();
+  }}
 }});
 
 videoControls.addEventListener('mousemove', function(e) {{
@@ -1415,29 +1463,6 @@ videoControls.addEventListener('click', function(e) {{
 
 videoPlayer.addEventListener('play', function() {{
   resetControlsTimer();
-}});
-
-document.addEventListener('fullscreenchange', handleFullscreenChange);
-document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-document.addEventListener('mozfullscreenchange', handleFullscreenChange);
-document.addEventListener('MSFullscreenChange', handleFullscreenChange);
-
-function handleFullscreenChange() {{
-  if (!document.fullscreenElement && 
-      !document.webkitFullscreenElement && 
-      !document.mozFullScreenElement && 
-      !document.msFullscreenElement) {{
-    videoPlayerWrapper.classList.remove("fullscreen");
-    fullscreenBtn.innerHTML = '<i class="fa-solid fa-expand"></i>';
-    isFullscreen = false;
-    showControls();
-  }}
-}}
-
-document.addEventListener('click', function(e) {{
-  if (!qualityBtn.contains(e.target) && !qualityMenu.contains(e.target)) {{
-    qualityMenu.classList.remove('active');
-  }}
 }});
 
 // جلب شعار المسلسل
@@ -1908,8 +1933,52 @@ async def list_series_files() -> List[dict]:
             logger.exception("Error listing series files: %s", e)
             return []
 
+async def fix_all_series_fullscreen() -> Dict[str, str]:
+    """
+    إصلاح جميع ملفات المسلسلات الموجودة على GitHub
+    يقوم بإعادة توليد كل ملف HTML باستخدام القالب المحدث (الذي يتضمن إصلاح التكبير/التصغير)
+    Returns: {"success": [...], "failed": [...], "skipped": [...]}
+    """
+    results = {"success": [], "failed": [], "skipped": []}
+    
+    series_list = await list_series_files()
+    if not series_list:
+        return results
+    
+    for s in series_list:
+        tmdb_id = s["id"]
+        try:
+            # جلب محتوى الملف الحالي
+            html_content = await get_series_html(tmdb_id)
+            if not html_content:
+                results["skipped"].append(tmdb_id)
+                continue
+            
+            # استخراج الروابط الحالية
+            current_links = extract_episode_links(html_content)
+            if not current_links:
+                results["skipped"].append(tmdb_id)
+                continue
+            
+            # إعادة توليد الملف بالقالب المحدث (الذي يتضمن إصلاح fullscreen)
+            ok = await upload_series_html(tmdb_id, current_links)
+            
+            if ok:
+                results["success"].append(tmdb_id)
+            else:
+                results["failed"].append(tmdb_id)
+            
+            # تأخير بسيط لتجنب rate limit من GitHub
+            await asyncio.sleep(1)
+            
+        except Exception as e:
+            logger.exception("Error fixing series %s: %s", tmdb_id, e)
+            results["failed"].append(tmdb_id)
+    
+    return results
+
 # ----------------------------- TELEGRAM HANDLERS -----------------------------
-MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "تعديل المسلسلات"], ["حذف كارت"]]
+MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "تعديل المسلسلات"], ["اصلاح جميع المسلسلات"], ["حذف كارت"]]
 
 async def show_main_menu(update: Update):
     await update.message.reply_text(
@@ -2145,7 +2214,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             f"الموسم {season_number} يحتوي على {season_info['episodes']} حلقة\n\n"
-            f"ارسل روابط/Tokens الحلقات (كل سطر = حلقة واحدة بالترتيب):\n"
+            f"ارسل روابط/Tokens الحلقات (كل سطر = حلق�� واحدة بالترتيب):\n"
             f"مثال:\n"
             f"token1\n"
             f"token2\n"
@@ -2648,6 +2717,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"الحلقة {delete_key} غير موجودة.")
         
+        user_states.pop(uid, None)
+        await show_main_menu(update)
+        return
+
+    # ===== اصلاح جميع المسلسلات =====
+    if text == "اصلاح جميع المسلسلات":
+        await update.message.reply_text(
+            "جاري إصلاح جميع ملفات المسلسلات...\n"
+            "هذه العملية قد تستغرق بعض الوقت.\n"
+            "سيتم إعادة توليد كل ملف بالقالب المحدث (إصلاح التكبير/التصغير).",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        
+        results = await fix_all_series_fullscreen()
+        
+        success_count = len(results["success"])
+        failed_count = len(results["failed"])
+        skipped_count = len(results["skipped"])
+        
+        report = f"تم الانتهاء من إصلاح المسلسلات!\n\n"
+        report += f"تم إصلاحه: {success_count}\n"
+        report += f"فشل: {failed_count}\n"
+        report += f"تم تخطيه: {skipped_count}\n"
+        
+        if results["success"]:
+            report += f"\nالمسلسلات التي تم إصلاحها:\n"
+            for sid in results["success"]:
+                report += f"  - {sid}\n"
+        
+        if results["failed"]:
+            report += f"\nالمسلسلات التي فشلت:\n"
+            for sid in results["failed"]:
+                report += f"  - {sid}\n"
+        
+        if results["skipped"]:
+            report += f"\nالمسلسلات التي تم تخطيها (بدون روابط):\n"
+            for sid in results["skipped"]:
+                report += f"  - {sid}\n"
+        
+        await update.message.reply_text(report)
         user_states.pop(uid, None)
         await show_main_menu(update)
         return
