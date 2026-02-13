@@ -2016,52 +2016,8 @@ async def list_series_files() -> List[dict]:
             logger.exception("Error listing series files: %s", e)
             return []
 
-async def fix_all_series_fullscreen() -> Dict[str, str]:
-    """
-    إصلاح جميع ملفات المسلسلات الموجودة على GitHub
-    يقوم بإعادة توليد كل ملف HTML باستخدام القالب المحدث (الذي يتضمن إصلاح التكبير/التصغير)
-    Returns: {"success": [...], "failed": [...], "skipped": [...]}
-    """
-    results = {"success": [], "failed": [], "skipped": []}
-    
-    series_list = await list_series_files()
-    if not series_list:
-        return results
-    
-    for s in series_list:
-        tmdb_id = s["id"]
-        try:
-            # جلب محتوى الملف الحالي
-            html_content = await get_series_html(tmdb_id)
-            if not html_content:
-                results["skipped"].append(tmdb_id)
-                continue
-            
-            # استخراج الروابط الحالية
-            current_links = extract_episode_links(html_content)
-            if not current_links:
-                results["skipped"].append(tmdb_id)
-                continue
-            
-            # إعادة توليد الملف بالقالب المحدث (الذي يتضمن إصلاح fullscreen)
-            ok = await upload_series_html(tmdb_id, current_links)
-            
-            if ok:
-                results["success"].append(tmdb_id)
-            else:
-                results["failed"].append(tmdb_id)
-            
-            # تأخير بسيط لتجنب rate limit من GitHub
-            await asyncio.sleep(1)
-            
-        except Exception as e:
-            logger.exception("Error fixing series %s: %s", tmdb_id, e)
-            results["failed"].append(tmdb_id)
-    
-    return results
-
 # ----------------------------- TELEGRAM HANDLERS -----------------------------
-MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات"], ["اصلاح جميع المسلسلات"], ["حذف كارت"]]
+MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "تعديل المسلسلات"], ["حذف كارت"]]
 
 async def show_main_menu(update: Update):
     await update.message.reply_text(
@@ -2327,7 +2283,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         links = [link.strip() for link in text.strip().split('\n') if link.strip()]
         
         if len(links) == 0:
-            await update.message.reply_text("لم يتم إرسال أي روابط. حاول مرة أخرى.")
+            await update.message.reply_text("لم يتم إرسال أي روابط. حاول م��ة أخرى.")
             return
         
         # حفظ الروابط
@@ -2422,7 +2378,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"عدد الحلقات المضافة: {len(episode_links)}\n"
                 f"الرابط: series/{tmdb_id}.html\n\n"
                 f"تم إضافة الكارت في:\n"
-                f"- الإضافات الأخيرة: {'نعم' if ok_latest else 'لا'}\n"
+                f"- الإضاف��ت الأخيرة: {'نعم' if ok_latest else 'لا'}\n"
                 f"- قسم المسلسلات: {'نعم' if ok_series else 'لا'}\n"
                 f"- صفحة اكتشف: {'نعم' if ok_disc else 'لا'}"
             )
@@ -2490,6 +2446,67 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await update.message.reply_text(
             "اختر المسلسل المستمر لمراجعته:",
+            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+        )
+        return
+
+    # ===== تعديل المسلسلات (جميع المسلسلات) =====
+    if text == "تعديل المسلسلات":
+        await update.message.reply_text("جاري جلب قائمة جميع المسلسلات...")
+        
+        series_list = await list_series_files()
+        
+        if not series_list:
+            await update.message.reply_text("لا توجد مسلسلات مضافة حاليًا.")
+            await show_main_menu(update)
+            return
+        
+        # جلب معلومات كل مسلسل من TMDB (جميعها)
+        enriched_list = []
+        for s in series_list[:20]:  # حد أقصى 20
+            series_data = await get_series(s["id"])
+            if series_data:
+                status = series_data.get("status", "")
+                status_ar = "مستمر" if status in ["Returning Series", "In Production"] else "منتهي"
+                enriched_list.append({
+                    "id": s["id"],
+                    "name": series_data.get("name", "بدون اسم"),
+                    "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
+                    "status_ar": status_ar
+                })
+            else:
+                enriched_list.append({
+                    "id": s["id"],
+                    "name": f"مسلسل {s['id']}",
+                    "poster": None,
+                    "status_ar": "غير معروف"
+                })
+        
+        state["series_list"] = enriched_list
+        state["step"] = "REVIEW_SELECT"
+        user_states[uid] = state
+        
+        # عرض المسلسلات مع الصور
+        keyboard = []
+        for s in enriched_list:
+            try:
+                if s['poster']:
+                    await update.message.reply_photo(
+                        photo=s['poster'],
+                        caption=f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}"
+                    )
+                else:
+                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}")
+            except Exception as e:
+                await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
+            
+            # إضافة زر للاختيار
+            keyboard.append([f"{s['name'][:25]} ({s['id']})"])
+        
+        keyboard.append(["رجوع"])
+        
+        await update.message.reply_text(
+            "اختر المسلسل للتعديل:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
         return
@@ -2788,46 +2805,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_main_menu(update)
         return
 
-    # ===== اصلاح جميع المسلسلات =====
-    if text == "اصلاح جميع المسلسلات":
-        await update.message.reply_text(
-            "جاري إصلاح جميع ملفات المسلسلات...\n"
-            "هذه العملية قد تستغرق بعض الوقت.\n"
-            "سيتم إعادة توليد كل ملف بالقالب المحدث (إصلاح التكبير/التصغير).",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        
-        results = await fix_all_series_fullscreen()
-        
-        success_count = len(results["success"])
-        failed_count = len(results["failed"])
-        skipped_count = len(results["skipped"])
-        
-        report = f"تم الانتهاء من إصلاح المسلسلات!\n\n"
-        report += f"تم إصلاحه: {success_count}\n"
-        report += f"فشل: {failed_count}\n"
-        report += f"تم تخطيه: {skipped_count}\n"
-        
-        if results["success"]:
-            report += f"\nالمسلسلات التي تم إصلاحها:\n"
-            for sid in results["success"]:
-                report += f"  - {sid}\n"
-        
-        if results["failed"]:
-            report += f"\nالمسلسلات التي فشلت:\n"
-            for sid in results["failed"]:
-                report += f"  - {sid}\n"
-        
-        if results["skipped"]:
-            report += f"\nالمسلسلات التي تم تخطيها (بدون روابط):\n"
-            for sid in results["skipped"]:
-                report += f"  - {sid}\n"
-        
-        await update.message.reply_text(report)
-        user_states.pop(uid, None)
-        await show_main_menu(update)
-        return
-
     # ===== حذف كارت =====
     if text == "حذف كارت":
         keyboard = [["الصفحة الرئيسية", "صفحة اكتشف"], ["رجوع"]]
@@ -2943,7 +2920,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await delete_card_from_github(card_id, MAIN_FILE, MARKERS[section_key][0], MARKERS[section_key][1])
         
         if ok:
-            await update.message.reply_text(f"تم حذف الكارت من {section_name}\nID: {card_id}")
+            await update.message.reply_text(f"تم حذف ��لكارت من {section_name}\nID: {card_id}")
         else:
             await update.message.reply_text("فشل حذف الكارت.")
         
