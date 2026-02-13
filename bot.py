@@ -43,6 +43,7 @@ MARKERS = {
     "INDIAN": ("<!-- START_INDIAN -->", "<!-- END_INDIAN -->"),
     "OFFERS": ("<!-- START_OFFERS -->", "<!-- END_OFFERS -->"),
     "SERIES": ("<!-- START_SERIES -->", "<!-- END_SERIES -->"),
+    "RECENT_EPISODES": ("<!-- START_RECENT_EPISODES -->", "<!-- END_RECENT_EPISODES -->"),
 }
 
 SECTION_MARKERS = {
@@ -1662,6 +1663,88 @@ def build_card_series_discover(s: dict, tmdb_id: str, titles: Dict[str, str]) ->
 </div>
 </div>'''
 
+# ----------------------------- RECENT EPISODE CARD BUILDER -----------------------------
+def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: int, episode_number: int, titles: Dict[str, str]) -> str:
+    """
+    إنشاء كارت حلقة مضافة حديثاً لقسم "حلقات مضافة حديثاً" في الصفحة الرئيسية
+    """
+    poster_path = series_data.get("poster_path", "")
+    poster_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else ""
+    title = titles.get("primary", series_data.get("name", ""))
+    href = f"series/{tmdb_id}.html"
+    
+    import datetime
+    now = datetime.datetime.now()
+    time_str = f"تمت الإضافة: {now.strftime('%Y-%m-%d %H:%M')}"
+    
+    return f'''<a href="{href}" class="episode-modern">
+<div class="episode-thumb">
+<img src="{poster_url}" alt="{title}">
+<span class="ep-tag">S{season_number:02d} - E{episode_number:02d}</span>
+</div>
+<div class="episode-info">
+<div class="ep-title">{title}</div>
+<div class="ep-sub">{time_str}</div>
+</div>
+</a>'''
+
+def insert_recent_episode_card(html_content: str, card_html: str, start_marker: str, end_marker: str, max_cards: int = 20) -> Optional[str]:
+    """
+    إدراج كارت حلقة جديدة في قسم الحلقات المضافة حديثاً
+    يحتفظ بحد أقصى max_cards كارت ويحذف الأقدم
+    """
+    if start_marker not in html_content or end_marker not in html_content:
+        logger.error(f"Markers not found for recent episodes: {start_marker}")
+        return None
+    
+    start_idx = html_content.find(start_marker) + len(start_marker)
+    end_idx = html_content.find(end_marker)
+    section_content = html_content[start_idx:end_idx]
+    
+    # إضافة الكارت الجديد في البداية
+    new_section = "\n" + card_html + section_content
+    
+    # حساب عدد الكاردات الحالية وحذف الزائد
+    soup = BeautifulSoup(new_section, 'html.parser')
+    cards = soup.find_all('a', class_='episode-modern')
+    
+    if len(cards) > max_cards:
+        # حذف الكاردات الزائدة (الأقدم - من النهاية)
+        for card in cards[max_cards:]:
+            card.decompose()
+    
+    updated_section = str(soup)
+    result = html_content[:html_content.find(start_marker) + len(start_marker)] + "\n" + updated_section + "\n" + html_content[end_idx:]
+    
+    return result
+
+async def push_recent_episode_to_github(card_html: str) -> bool:
+    """رفع كارت الحلقة المضافة حديثاً إلى الصفحة الرئيسية"""
+    async with aiohttp.ClientSession() as session:
+        data = await github_get_file(session, MAIN_FILE)
+        if not data:
+            return False
+        
+        sha = data.get("sha")
+        encoded = data.get("content", "")
+        try:
+            decoded = base64.b64decode(encoded).decode("utf-8")
+        except Exception as e:
+            logger.exception("Failed to decode file content: %s", e)
+            return False
+        
+        start_marker = MARKERS["RECENT_EPISODES"][0]
+        end_marker = MARKERS["RECENT_EPISODES"][1]
+        
+        updated = insert_recent_episode_card(decoded, card_html, start_marker, end_marker)
+        if updated is None:
+            logger.error("Failed to insert recent episode card: markers not found")
+            return False
+        
+        new_b64 = base64.b64encode(updated.encode("utf-8")).decode()
+        res = await github_put_file(session, MAIN_FILE, new_b64, sha, "Add recent episode card via bot")
+        return res is not None
+
 # ----------------------------- BeautifulSoup HTML HELPERS -----------------------------
 def insert_card_with_bs4(html_content: str, card_html: str, start_marker: str, end_marker: str) -> Optional[str]:
     if start_marker not in html_content or end_marker not in html_content:
@@ -1978,7 +2061,7 @@ async def fix_all_series_fullscreen() -> Dict[str, str]:
     return results
 
 # ----------------------------- TELEGRAM HANDLERS -----------------------------
-MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "تعديل المسلسلات"], ["اصلاح جميع المسلسلات"], ["حذف كارت"]]
+MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات"], ["اصلاح جميع المسلسلات"], ["حذف كارت"]]
 
 async def show_main_menu(update: Update):
     await update.message.reply_text(
@@ -2411,67 +2494,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # ===== تعديل المسلسلات (جميع المسلسلات) =====
-    if text == "تعديل المسلسلات":
-        await update.message.reply_text("جاري جلب قائمة جميع المسلسلات...")
-        
-        series_list = await list_series_files()
-        
-        if not series_list:
-            await update.message.reply_text("لا توجد مسلسلات مضافة حاليًا.")
-            await show_main_menu(update)
-            return
-        
-        # جلب معلومات كل مسلسل من TMDB (جميعها)
-        enriched_list = []
-        for s in series_list[:20]:  # حد أقصى 20
-            series_data = await get_series(s["id"])
-            if series_data:
-                status = series_data.get("status", "")
-                status_ar = "مستمر" if status in ["Returning Series", "In Production"] else "منتهي"
-                enriched_list.append({
-                    "id": s["id"],
-                    "name": series_data.get("name", "بدون اسم"),
-                    "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
-                    "status_ar": status_ar
-                })
-            else:
-                enriched_list.append({
-                    "id": s["id"],
-                    "name": f"مسلسل {s['id']}",
-                    "poster": None,
-                    "status_ar": "غير معروف"
-                })
-        
-        state["series_list"] = enriched_list
-        state["step"] = "REVIEW_SELECT"
-        user_states[uid] = state
-        
-        # عرض المسلسلات مع الصور
-        keyboard = []
-        for s in enriched_list:
-            try:
-                if s['poster']:
-                    await update.message.reply_photo(
-                        photo=s['poster'],
-                        caption=f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}"
-                    )
-                else:
-                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}")
-            except Exception as e:
-                await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
-            
-            # إضافة زر للاختيار
-            keyboard.append([f"{s['name'][:25]} ({s['id']})"])
-        
-        keyboard.append(["رجوع"])
-        
-        await update.message.reply_text(
-            "اختر المسلسل للتعديل:",
-            reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
-        )
-        return
-
     if state.get("step") == "REVIEW_SELECT":
         if text == "رجوع":
             user_states.pop(uid, None)
@@ -2604,7 +2626,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await update_series_episodes(tmdb_id, new_links)
         
         if ok:
-            await update.message.reply_text(f"تمت اضافة الحلقة S{season} E{episode} بنجاح!")
+            # إضافة كارت في قسم "حلقات مضافة حديثاً" تلقائياً
+            series_data = state.get("review_series")
+            if series_data:
+                # تحديد العناوين
+                titles = determine_title_display(series_data)
+                if titles.get("secondary") == "FETCH_ARABIC":
+                    arabic_title = await fetch_arabic_title(tmdb_id, "tv")
+                    if arabic_title and arabic_title != titles["primary"]:
+                        titles["secondary"] = arabic_title
+                    else:
+                        titles["secondary"] = None
+                
+                recent_card = build_recent_episode_card(series_data, tmdb_id, season, episode, titles)
+                ok_recent = await push_recent_episode_to_github(recent_card)
+                
+                recent_info = ""
+                if ok_recent:
+                    recent_info = "\n✨ تمت الإضافة في قسم 'حلقات مضافة حديثاً' في الصفحة الرئيسية"
+                else:
+                    recent_info = "\n⚠️ فشل الإضافة في قسم 'حلقات مضافة حديثاً' (تحقق من وجود الـ markers)"
+                
+                await update.message.reply_text(f"تمت اضافة الحلقة S{season} E{episode} بنجاح!{recent_info}")
+            else:
+                await update.message.reply_text(f"تمت اضافة الحلقة S{season} E{episode} بنجاح!")
         else:
             await update.message.reply_text("فشل في تحديث الملف.")
         
@@ -2654,7 +2699,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok = await update_series_episodes(tmdb_id, new_links)
         
         if ok:
-            await update.message.reply_text(f"تمت اضافة الموسم {season} بنجاح! ({len(new_links)} حلقة)")
+            # إضافة آخر حلقة في قسم "حلقات مضافة حديثاً"
+            series_data = state.get("review_series")
+            recent_info = ""
+            if series_data:
+                titles = determine_title_display(series_data)
+                if titles.get("secondary") == "FETCH_ARABIC":
+                    arabic_title = await fetch_arabic_title(tmdb_id, "tv")
+                    if arabic_title and arabic_title != titles["primary"]:
+                        titles["secondary"] = arabic_title
+                    else:
+                        titles["secondary"] = None
+                
+                # إضافة كارت لآخر حلقة من الموسم المضاف
+                last_ep = len(links)
+                recent_card = build_recent_episode_card(series_data, tmdb_id, season, last_ep, titles)
+                ok_recent = await push_recent_episode_to_github(recent_card)
+                
+                if ok_recent:
+                    recent_info = "\n✨ تمت الإضافة في قسم 'حلقات مضافة حديثاً'"
+                else:
+                    recent_info = "\n⚠️ فشل الإضافة في قسم 'حلقات مضافة حديثاً'"
+            
+            await update.message.reply_text(f"تمت اضافة الموسم {season} بنجاح! ({len(new_links)} حلقة){recent_info}")
         else:
             await update.message.reply_text("فشل في تحديث الملف.")
         
