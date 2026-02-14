@@ -1690,27 +1690,23 @@ def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: in
     now = datetime.datetime.now()
     time_str = f"تمت الإضافة: {now.strftime('%Y-%m-%d %H:%M')}"
     
-    # بناء عنوان ثانوي إذا وُجد
-    secondary_html = f'<div class="ep-secondary-title">{secondary_title}</div>' if secondary_title and secondary_title != "FETCH_ARABIC" else ""
+    # بناء عنوان ثانوي إذا وُجد (لا نعرضه في كارت الحلقة لتوفير المساحة)
+    secondary_html = ""
     
-    return f'''<a href="{href}" class="episode-modern" style="display:inline-block;width:280px;flex:0 0 auto;text-decoration:none;color:#fff;vertical-align:top;">
-<div class="episode-thumb" style="position:relative;width:100%;aspect-ratio:16/9;border-radius:10px;overflow:hidden;background:#1a1a1a;">
-<img src="{thumb_url}" alt="{title}" style="width:100%;height:100%;object-fit:cover;display:block;">
-<span class="ep-tag" style="position:absolute;top:8px;left:8px;background:rgba(0,0,0,0.7);color:#fff;padding:2px 8px;border-radius:4px;font-size:0.75rem;">S{season_number:02d} E{episode_number:02d}</span>
-<span class="ep-badge" style="position:absolute;top:8px;right:8px;background:#2196F3;color:#fff;padding:2px 6px;border-radius:4px;font-size:0.7rem;font-weight:bold;">HD</span>
-<div class="ep-rating" style="position:absolute;bottom:8px;right:8px;display:flex;align-items:center;gap:4px;background:rgba(0,0,0,0.7);padding:2px 8px;border-radius:4px;">
-<i class="fas fa-star" style="color:#f5c518;font-size:0.75rem;"></i>
-<span style="font-size:0.8rem;font-weight:bold;">{rating}</span>
+    return f'''<a href="{href}" class="episode-modern">
+<div class="episode-thumb">
+<img src="{thumb_url}" alt="{title}">
+<span class="ep-tag">S{season_number:02d} E{episode_number:02d}</span>
+<span class="ep-badge">HD</span>
+<div class="ep-rating">
+<span class="star">⭐</span>
+<span>{rating}</span>
 </div>
 </div>
-<div class="episode-info" style="padding:8px 4px;">
-<div class="ep-title" style="font-size:0.95rem;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;">{title}</div>
-{secondary_html}
-<div class="ep-sub" style="font-size:0.75rem;color:#888;margin-top:4px;text-align:right;">الحلقة {episode_number} - الموسم {season_number}</div>
-<div class="ep-time" style="font-size:0.7rem;color:#2196F3;margin-top:2px;text-align:right;display:flex;align-items:center;justify-content:flex-end;gap:4px;">
-<span style="width:6px;height:6px;background:#2196F3;border-radius:50%;display:inline-block;"></span>
-{time_str}
-</div>
+<div class="episode-info">
+<div class="ep-title">{title}</div>
+<div class="ep-sub">الحلقة {episode_number} - الموسم {season_number}</div>
+<div class="ep-time">● تمت الإضافة منذ ساعة</div>
 </div>
 </a>'''
 
