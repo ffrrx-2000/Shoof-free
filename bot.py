@@ -1667,13 +1667,11 @@ def build_card_series_discover(s: dict, tmdb_id: str, titles: Dict[str, str]) ->
 def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: int, episode_number: int, titles: Dict[str, str]) -> str:
     """
     إنشاء كارت حلقة مضافة حديثاً لقسم "حلقات مضافة حديثاً" في الصفحة الرئيسية
-    يستخدم صورة backdrop (أفقية) بدلاً من poster (عمودية) للعرض الصحيح
+    يستخدم صورة backdrop (أفقية) + inline styles كاملة لضمان العرض الصحيح
     """
-    # استخدام backdrop_path (صورة أفقية مستطيلة) بدلاً من poster_path (صورة عمودية طويلة)
     backdrop_path = series_data.get("backdrop_path", "")
     poster_path = series_data.get("poster_path", "")
     
-    # الأولوية للصورة الأفقية (backdrop)، وإذا لم تتوفر نستخدم poster
     if backdrop_path:
         thumb_url = f"https://image.tmdb.org/t/p/w780{backdrop_path}"
     elif poster_path:
@@ -1682,31 +1680,23 @@ def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: in
         thumb_url = ""
     
     title = titles.get("primary", series_data.get("name", ""))
-    secondary_title = titles.get("secondary", "")
     rating = f"{series_data.get('vote_average', 0):.1f}"
     href = f"series/{tmdb_id}.html"
     
-    import datetime
-    now = datetime.datetime.now()
-    time_str = f"تمت الإضافة: {now.strftime('%Y-%m-%d %H:%M')}"
-    
-    # بناء عنوان ثانوي إذا وُجد (لا نعرضه في كارت الحلقة لتوفير المساحة)
-    secondary_html = ""
-    
-    return f'''<a href="{href}" class="episode-modern">
-<div class="episode-thumb">
-<img src="{thumb_url}" alt="{title}">
-<span class="ep-tag">S{season_number:02d} E{episode_number:02d}</span>
-<span class="ep-badge">HD</span>
-<div class="ep-rating">
-<span class="star">⭐</span>
-<span>{rating}</span>
+    return f'''<a href="{href}" class="episode-modern" style="display:inline-block;width:calc(50% - 8px);vertical-align:top;text-decoration:none;color:#fff;margin:0 4px;">
+<div style="position:relative;width:100%;border-radius:12px;overflow:hidden;background:#1a1a1a;aspect-ratio:16/9;">
+<img src="{thumb_url}" alt="{title}" style="width:100%;height:100%;object-fit:cover;display:block;">
+<span style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,0.75);color:#fff;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600;">S{season_number:02d} E{episode_number:02d}</span>
+<span style="position:absolute;top:6px;right:6px;background:#2196F3;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:bold;">HD</span>
+<div style="position:absolute;bottom:6px;right:6px;display:flex;align-items:center;gap:3px;background:rgba(0,0,0,0.75);padding:3px 7px;border-radius:4px;">
+<span style="color:#f5c518;font-size:11px;">&#9733;</span>
+<span style="font-size:12px;font-weight:bold;color:#fff;">{rating}</span>
 </div>
 </div>
-<div class="episode-info">
-<div class="ep-title">{title}</div>
-<div class="ep-sub">الحلقة {episode_number} - الموسم {season_number}</div>
-<div class="ep-time">● تمت الإضافة منذ ساعة</div>
+<div style="padding:6px 2px 0;">
+<div style="font-size:14px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;color:#fff;">{title}</div>
+<div style="font-size:12px;color:#999;margin-top:2px;text-align:right;">الحلقة {episode_number} - الموسم {season_number}</div>
+<div style="font-size:11px;color:#2196F3;margin-top:3px;text-align:right;direction:rtl;"><span style="display:inline-block;width:6px;height:6px;background:#2196F3;border-radius:50;vertical-align:middle;margin-left:4px;"></span>تمت الإضافة منذ ساعة</div>
 </div>
 </a>'''
 
