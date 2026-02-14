@@ -1683,7 +1683,10 @@ def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: in
     rating = f"{series_data.get('vote_average', 0):.1f}"
     href = f"series/{tmdb_id}.html"
     
-    return f'''<a href="{href}" class="episode-modern" style="display:inline-block;width:calc(50% - 8px);vertical-align:top;text-decoration:none;color:#fff;margin:0 4px;">
+    import datetime
+    now_iso = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    
+    return f'''<a href="{href}" class="episode-modern" style="display:block;width:calc(50% - 8px);flex:0 0 calc(50% - 8px);text-decoration:none;color:#fff;">
 <div style="position:relative;width:100%;border-radius:12px;overflow:hidden;background:#1a1a1a;aspect-ratio:16/9;">
 <img src="{thumb_url}" alt="{title}" style="width:100%;height:100%;object-fit:cover;display:block;">
 <span style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,0.75);color:#fff;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600;">S{season_number:02d} E{episode_number:02d}</span>
@@ -1696,7 +1699,7 @@ def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: in
 <div style="padding:6px 2px 0;">
 <div style="font-size:14px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;color:#fff;">{title}</div>
 <div style="font-size:12px;color:#999;margin-top:2px;text-align:right;">الحلقة {episode_number} - الموسم {season_number}</div>
-<div style="font-size:11px;color:#2196F3;margin-top:3px;text-align:right;direction:rtl;"><span style="display:inline-block;width:6px;height:6px;background:#2196F3;border-radius:50;vertical-align:middle;margin-left:4px;"></span>تمت الإضافة منذ ساعة</div>
+<div class="ep-time-ago" data-time="{now_iso}" style="font-size:11px;color:#2196F3;margin-top:3px;text-align:right;direction:rtl;"><span style="display:inline-block;width:6px;height:6px;background:#2196F3;border-radius:50%;vertical-align:middle;margin-left:4px;"></span>تمت الإضافة الآن</div>
 </div>
 </a>'''
 
@@ -1704,6 +1707,7 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
     """
     إدراج كارت حلقة جديدة في قسم الحلقات المضافة حديثاً
     يحتفظ بحد أقصى max_cards كارت ويحذف الأقدم
+    يلف الكروت في حاوية flex مع سكريبت لحساب الوقت النسبي
     """
     if start_marker not in html_content or end_marker not in html_content:
         logger.error(f"Markers not found for recent episodes: {start_marker}")
@@ -1713,20 +1717,52 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
     end_idx = html_content.find(end_marker)
     section_content = html_content[start_idx:end_idx]
     
+    # استخراج الكروت الموجودة فقط (بدون الحاوية والسكريبت القديم)
+    soup = BeautifulSoup(section_content, 'html.parser')
+    existing_cards = soup.find_all('a', class_='episode-modern')
+    existing_cards_html = ''.join(str(c) for c in existing_cards)
+    
     # إضافة الكارت الجديد في البداية
-    new_section = "\n" + card_html + section_content
+    all_cards_html = card_html + existing_cards_html
     
-    # حساب عدد الكاردات الحالية وحذف الزائد
-    soup = BeautifulSoup(new_section, 'html.parser')
-    cards = soup.find_all('a', class_='episode-modern')
-    
+    # حساب عدد الكاردات وحذف الزائد
+    soup2 = BeautifulSoup(all_cards_html, 'html.parser')
+    cards = soup2.find_all('a', class_='episode-modern')
     if len(cards) > max_cards:
-        # حذف الكاردات الزائدة (الأقدم - من النهاية)
         for card in cards[max_cards:]:
             card.decompose()
+    cards_final = str(soup2)
     
-    updated_section = str(soup)
-    result = html_content[:html_content.find(start_marker) + len(start_marker)] + "\n" + updated_section + "\n" + html_content[end_idx:]
+    # سكريبت الوقت النسبي (يحدث النص تلقائياً)
+    time_script = '''<script>
+(function(){
+  function updateTimes(){
+    document.querySelectorAll('.ep-time-ago[data-time]').forEach(function(el){
+      var t=new Date(el.getAttribute('data-time')).getTime();
+      var now=Date.now();
+      var diff=Math.floor((now-t)/1000);
+      var txt='';
+      if(diff<60) txt='تمت الإضافة منذ لحظات';
+      else if(diff<3600){var m=Math.floor(diff/60);txt='تمت الإضافة منذ '+m+' دقيقة';}
+      else if(diff<86400){var h=Math.floor(diff/3600);var rm=Math.floor((diff%3600)/1800);if(rm>=1)txt='تمت الإضافة منذ '+h+' ساعة ونصف';else txt='تمت الإضافة منذ '+h+' ساعة';}
+      else{var d=Math.floor(diff/86400);txt='تمت الإضافة منذ '+d+' يوم';}
+      el.innerHTML='<span style="display:inline-block;width:6px;height:6px;background:#2196F3;border-radius:50%;vertical-align:middle;margin-left:4px;"></span>'+txt;
+    });
+  }
+  updateTimes();
+  setInterval(updateTimes,30000);
+})();
+</script>'''
+    
+    # بناء القسم: حاوية flex + كروت + سكريبت
+    wrapper = f'''
+<div style="display:flex;flex-wrap:wrap;gap:8px;padding:0 8px;overflow:hidden;clear:both;">
+{cards_final}
+</div>
+{time_script}
+'''
+    
+    result = html_content[:html_content.find(start_marker) + len(start_marker)] + wrapper + html_content[end_idx:]
     
     return result
 
@@ -2678,7 +2714,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 await update.message.reply_text(f"تمت اضافة الحلقة S{season} E{episode} بنجاح!{recent_info}")
             else:
-                await update.message.reply_text(f"تمت اضافة الحلقة S{season} E{episode} بنجاح!")
+                await update.message.reply_text(f"تم�� اضافة الحلقة S{season} E{episode} بنجاح!")
         else:
             await update.message.reply_text("فشل في تحديث الملف.")
         
