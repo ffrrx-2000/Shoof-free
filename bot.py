@@ -58,17 +58,21 @@ SECTION_MARKERS = {
 }
 
 # ----------------------------- LANGUAGE RULES -----------------------------
-# الدول الغربية (إنجليزي + عربي)
-WESTERN_COUNTRIES = ['US', 'GB', 'CA', 'AU', 'NZ', 'IE', 'FR', 'DE', 'IT', 'ES', 'PT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI', 'PL', 'CZ', 'HU', 'RO', 'GR', 'RU', 'UA', 'MX', 'BR', 'AR', 'CO', 'CL', 'PE']
-WESTERN_LANGUAGES = ['en', 'fr', 'de', 'it', 'es', 'pt', 'nl', 'sv', 'no', 'da', 'fi', 'pl', 'cs', 'hu', 'ro', 'el', 'ru', 'uk']
+# اللغات التي تُكتب بالإنجليزي فقط (كوري، ياباني، صيني، هندي)
+FORCE_ENGLISH_LANGUAGES = ['ko', 'ja', 'zh', 'hi', 'ta', 'te', 'ml', 'bn']
+FORCE_ENGLISH_COUNTRIES = ['KR', 'JP', 'CN', 'TW', 'HK', 'IN']
 
-# الدول الآسيوية (إنجليزي فقط)
-ASIAN_COUNTRIES = ['JP', 'KR', 'CN', 'TW', 'HK', 'TH', 'VN', 'ID', 'MY', 'PH', 'SG', 'IN']
-ASIAN_LANGUAGES = ['ja', 'ko', 'zh', 'th', 'vi', 'id', 'ms', 'tl', 'hi', 'ta', 'te', 'ml', 'bn']
+# العربية (تُكتب بلغتها الأصلية = العربي)
+ARABIC_LANGUAGES = ['ar']
+ARABIC_COUNTRIES = ['EG', 'SA', 'AE', 'KW', 'QA', 'BH', 'OM', 'IQ', 'SY', 'LB', 'JO', 'PS', 'YE', 'LY', 'TN', 'DZ', 'MA', 'SD']
 
-# تركيا (تركي + إنجليزي)
+# تركيا (تُكتب بلغتها الأصلية = التركي)
 TURKISH_COUNTRIES = ['TR']
 TURKISH_LANGUAGES = ['tr']
+
+# باقي اللغات الغربية وغيرها تُكتب بلغة العمل الأصلية
+WESTERN_COUNTRIES = ['US', 'GB', 'CA', 'AU', 'NZ', 'IE', 'FR', 'DE', 'IT', 'ES', 'PT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI', 'PL', 'CZ', 'HU', 'RO', 'GR', 'RU', 'UA', 'MX', 'BR', 'AR', 'CO', 'CL', 'PE']
+WESTERN_LANGUAGES = ['en', 'fr', 'de', 'it', 'es', 'pt', 'nl', 'sv', 'no', 'da', 'fi', 'pl', 'cs', 'hu', 'ro', 'el', 'ru', 'uk']
 
 # ----------------------------- GENRE TRANSLATIONS -----------------------------
 GENRE_TRANSLATIONS = {
@@ -115,7 +119,9 @@ user_states = {}
 # ----------------------------- TITLE DISPLAY LOGIC -----------------------------
 def determine_title_display(data: dict) -> Dict[str, str]:
     """
-    تحديد كيفية عرض العناوين بناءً على قواعد TMDB
+    تحديد كيفية عرض العناوين بناءً على لغة العمل الأصلية
+    القاعدة: كل عمل يُكتب بلغته الأصلية
+    ما عدا: الكوري والياباني والصيني والهندي = يُكتب بالإنجليزي
     Returns: {"primary": "...", "secondary": "..." or None}
     """
     original_language = data.get("original_language", "")
@@ -129,34 +135,40 @@ def determine_title_display(data: dict) -> Dict[str, str]:
     original_title = data.get("original_name") or data.get("original_title") or ""
     # العنوان الإنجليزي
     english_title = data.get("name") or data.get("title") or ""
-    # العنوان العربي (من الترجمة)
-    arabic_title = None
     
     result = {"primary": "", "secondary": None}
     
-    # 1) المحتوى التركي: تركي + إنجليزي
-    if original_language in TURKISH_LANGUAGES or any(c in TURKISH_COUNTRIES for c in origin_country):
-        result["primary"] = original_title  # التركي
-        if english_title and english_title != original_title:
-            result["secondary"] = english_title  # الإنجليزي
-        return result
-    
-    # 2) المحتوى الآسيوي: إنجليزي فقط
-    if original_language in ASIAN_LANGUAGES or any(c in ASIAN_COUNTRIES for c in origin_country):
+    # 1) الكوري والياباني والصيني والهندي: يُكتب بالإنجليزي فقط
+    if original_language in FORCE_ENGLISH_LANGUAGES or any(c in FORCE_ENGLISH_COUNTRIES for c in origin_country):
         result["primary"] = english_title  # الإنجليزي فقط
-        result["secondary"] = None  # لا عربي
+        result["secondary"] = None
         return result
     
-    # 3) المحتوى الغربي: إنجليزي + عربي
+    # 2) المحتوى العربي: يُكتب بالعربي (اللغة الأصلية)
+    if original_language in ARABIC_LANGUAGES or any(c in ARABIC_COUNTRIES for c in origin_country):
+        result["primary"] = original_title  # العربي (اللغة الأصلية)
+        if english_title and english_title != original_title:
+            result["secondary"] = english_title
+        return result
+    
+    # 3) المحتوى التركي: يُكتب بالتركي (اللغة الأصلية)
+    if original_language in TURKISH_LANGUAGES or any(c in TURKISH_COUNTRIES for c in origin_country):
+        result["primary"] = original_title  # التركي (اللغة الأصلية)
+        if english_title and english_title != original_title:
+            result["secondary"] = english_title
+        return result
+    
+    # 4) المحتوى الإنجليزي والغربي: يُكتب بلغة العمل الأصلية (إنجليزي/فرنسي/إسباني الخ)
     if original_language in WESTERN_LANGUAGES or any(c in WESTERN_COUNTRIES for c in origin_country):
-        result["primary"] = english_title  # الإنجليزي
-        # سنحصل على العنوان العربي لاحقًا من fetch_arabic_title
-        result["secondary"] = "FETCH_ARABIC"  # علامة لجلب العربي
+        result["primary"] = original_title  # اللغة الأصلية للعمل
+        if english_title and english_title != original_title:
+            result["secondary"] = english_title
         return result
     
-    # افتراضي: إنجليزي + عربي
-    result["primary"] = english_title
-    result["secondary"] = "FETCH_ARABIC"
+    # 5) افتراضي: اللغة الأصلية للعمل
+    result["primary"] = original_title if original_title else english_title
+    if english_title and english_title != original_title and original_title:
+        result["secondary"] = english_title
     return result
 
 async def fetch_arabic_title(tmdb_id: str, media_type: str = "tv") -> Optional[str]:
@@ -897,40 +909,29 @@ const SERIES_ID = {tmdb_id};
 const episodeLinks = {links_js};
 
 // ===== قواعد عرض العناوين =====
-const WESTERN_LANGUAGES = ['en', 'fr', 'de', 'it', 'es', 'pt', 'nl', 'sv', 'no', 'da', 'fi', 'pl', 'cs', 'hu', 'ro', 'el', 'ru', 'uk'];
-const ASIAN_LANGUAGES = ['ja', 'ko', 'zh', 'th', 'vi', 'id', 'ms', 'tl', 'hi', 'ta', 'te', 'ml', 'bn'];
-const TURKISH_LANGUAGES = ['tr'];
-const WESTERN_COUNTRIES = ['US', 'GB', 'CA', 'AU', 'NZ', 'IE', 'FR', 'DE', 'IT', 'ES', 'PT', 'NL', 'BE', 'AT', 'CH', 'SE', 'NO', 'DK', 'FI', 'PL', 'CZ', 'HU', 'RO', 'GR', 'RU', 'UA', 'MX', 'BR', 'AR', 'CO', 'CL', 'PE'];
-const ASIAN_COUNTRIES = ['JP', 'KR', 'CN', 'TW', 'HK', 'TH', 'VN', 'ID', 'MY', 'PH', 'SG', 'IN'];
-const TURKISH_COUNTRIES = ['TR'];
+// اللغات التي تُكتب بالإنجليزي فقط: كوري، ياباني، صيني، هندي
+const FORCE_ENGLISH_LANGUAGES = ['ko', 'ja', 'zh', 'hi', 'ta', 'te', 'ml', 'bn'];
+const FORCE_ENGLISH_COUNTRIES = ['KR', 'JP', 'CN', 'TW', 'HK', 'IN'];
 
 function determineTitleDisplay(data, arabicData) {{
   const originalLang = data.original_language || '';
   const originCountry = data.origin_country || [];
   const originalTitle = data.original_name || '';
   const englishTitle = data.name || '';
-  const arabicTitle = arabicData ? arabicData.name : null;
   
   let primary = '';
   let secondary = null;
   
-  // تركي
-  if (TURKISH_LANGUAGES.includes(originalLang) || originCountry.some(c => TURKISH_COUNTRIES.includes(c))) {{
-    primary = originalTitle;
-    if (englishTitle && englishTitle !== originalTitle) {{
-      secondary = englishTitle;
-    }}
-  }}
-  // آسيوي
-  else if (ASIAN_LANGUAGES.includes(originalLang) || originCountry.some(c => ASIAN_COUNTRIES.includes(c))) {{
+  // كوري/ياباني/صيني/هندي = إنجليزي فقط
+  if (FORCE_ENGLISH_LANGUAGES.includes(originalLang) || originCountry.some(c => FORCE_ENGLISH_COUNTRIES.includes(c))) {{
     primary = englishTitle;
     secondary = null;
   }}
-  // غربي
+  // باقي اللغات (عربي، تركي، إنجليزي، فرنسي الخ) = اللغة الأصلية
   else {{
-    primary = englishTitle;
-    if (arabicTitle && arabicTitle !== englishTitle) {{
-      secondary = arabicTitle;
+    primary = originalTitle || englishTitle;
+    if (englishTitle && englishTitle !== originalTitle && originalTitle) {{
+      secondary = englishTitle;
     }}
   }}
   
@@ -1550,7 +1551,9 @@ document.addEventListener('keydown', function(e) {{
 def build_card_movie_main(m: dict, tmdb_id: str, mux_id: str = "") -> str:
     poster_w500 = f"https://image.tmdb.org/t/p/w500{m.get('poster_path')}" if m.get("poster_path") else ""
     poster_orig = f"https://image.tmdb.org/t/p/original{m.get('poster_path')}" if m.get("poster_path") else poster_w500
-    title = m.get("title", "")
+    # تطبيق قاعدة اللغة: العنوان بلغة العمل الأصلية (ما عدا كوري/ياباني/صيني/هندي = إنجليزي)
+    titles = determine_title_display(m)
+    title = titles.get("primary", m.get("title", ""))
     rating = f"{m.get('vote_average', 0):.1f}"
     year = (m.get("release_date") or "")[:4] or ""
     
@@ -1584,7 +1587,9 @@ def build_card_movie_discover(m: dict, tmdb_id: str, mux_id: str = "") -> str:
     year = (m.get("release_date") or "")[:4] or ""
     poster_w500 = f"https://image.tmdb.org/t/p/w500{m.get('poster_path')}" if m.get("poster_path") else ""
     poster_orig = f"https://image.tmdb.org/t/p/original{m.get('poster_path')}" if m.get("poster_path") else poster_w500
-    title = m.get("title", "").replace('"', "&quot;")
+    # تطبيق قاعدة اللغة: العنوان بلغة العمل الأصلية (ما عدا كوري/ياباني/صيني/هندي = إنجليزي)
+    titles = determine_title_display(m)
+    title = titles.get("primary", m.get("title", "")).replace('"', "&quot;")
     rating = f"{m.get('vote_average', 0):.1f}"
     
     if mux_id:
@@ -1667,7 +1672,7 @@ def build_card_series_discover(s: dict, tmdb_id: str, titles: Dict[str, str]) ->
 def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: int, episode_number: int, titles: Dict[str, str]) -> str:
     """
     إنشاء كارت حلقة مضافة حديثاً لقسم "حلقات مضافة حديثاً" في الصفحة الرئيسية
-    يستخدم صورة backdrop (أفقية) + inline styles كاملة لضمان العرض الصحيح
+    يستخدم صورة backdrop (أفقية) بتصميم episode-card الجديد
     """
     backdrop_path = series_data.get("backdrop_path", "")
     poster_path = series_data.get("poster_path", "")
@@ -1686,20 +1691,23 @@ def build_recent_episode_card(series_data: dict, tmdb_id: str, season_number: in
     import datetime
     now_iso = datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
     
-    return f'''<a href="{href}" class="episode-modern" style="display:block;width:calc(50% - 8px);flex:0 0 calc(50% - 8px);text-decoration:none;color:#fff;">
-<div style="position:relative;width:100%;border-radius:12px;overflow:hidden;background:#1a1a1a;aspect-ratio:16/9;">
-<img src="{thumb_url}" alt="{title}" style="width:100%;height:100%;object-fit:cover;display:block;">
-<span style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,0.75);color:#fff;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600;">S{season_number:02d} E{episode_number:02d}</span>
-<span style="position:absolute;top:6px;right:6px;background:#2196F3;color:#fff;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:bold;">HD</span>
-<div style="position:absolute;bottom:6px;right:6px;display:flex;align-items:center;gap:3px;background:rgba(0,0,0,0.75);padding:3px 7px;border-radius:4px;">
-<span style="color:#f5c518;font-size:11px;">&#9733;</span>
-<span style="font-size:12px;font-weight:bold;color:#fff;">{rating}</span>
+    return f'''<a class="episode-card" href="{href}" style="flex: 0 0 auto; width: 220px; border-radius: 14px; background: #0a0a0a; overflow: hidden; text-decoration: none; color: inherit; scroll-snap-align: start;">
+<div class="thumb" style="position: relative; aspect-ratio: 16/9; background: #111; overflow: hidden;">
+<img alt="{title}" src="{thumb_url}" style="width: 100%; height: 100%; object-fit: cover;"/>
+<span class="badge" style="position: absolute; z-index: 2; top: 8px; inset-inline-start: 8px; background: rgba(0,0,0,.65); color: #fff; border-radius: 999px; font-size: 10px; padding: 2px 6px;">S{season_number:02d} E{episode_number:02d}</span>
+<span class="badge quality" style="position: absolute; z-index: 2; top: 8px; inset-inline-start: auto; inset-inline-end: 8px; background: linear-gradient(90deg, #0ea5e9, #3b82f6); color: #fff; border-radius: 999px; font-size: 10px; padding: 2px 6px;">HD</span>
+<div class="imdb" style="position: absolute; bottom: 6px; inset-inline-start: 6px; display: flex; align-items: center; gap: 4px; background: rgba(0,0,0,.6); border-radius: 999px; padding: 2px 6px;">
+<span style="color:#f5c518; font-size:11px;">★</span>
+<span style="font-size:12px; font-weight:bold;">{rating}</span>
 </div>
 </div>
-<div style="padding:6px 2px 0;">
-<div style="font-size:14px;font-weight:bold;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;color:#fff;">{title}</div>
-<div style="font-size:12px;color:#999;margin-top:2px;text-align:right;">الحلقة {episode_number} - الموسم {season_number}</div>
-<div class="ep-time-ago" data-time="{now_iso}" style="font-size:11px;color:#2196F3;margin-top:3px;text-align:right;direction:rtl;"><span style="display:inline-block;width:6px;height:6px;background:#2196F3;border-radius:50%;vertical-align:middle;margin-left:4px;"></span>تمت الإضافة الآن</div>
+<div class="meta" style="padding: 6px 8px;">
+<div class="title" style="font-size: 13px; font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{title}</div>
+<div class="subtitle" style="font-size: 12px; color: #a8b3cf; margin-top: 2px;">الحلقة {episode_number} - الموسم {season_number}</div>
+<div class="extra" style="margin-top: 4px; font-size: 11px; color: #a8b3cf; display: flex; align-items: center; gap: 6px;">
+<span class="dot" style="width: 6px; height: 6px; border-radius: 50%; background: #3b82f6;"></span>
+<span class="ep-time-ago" data-time="{now_iso}">تمت الإضافة الآن</span>
+</div>
 </div>
 </a>'''
 
@@ -1707,7 +1715,7 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
     """
     إدراج كارت حلقة جديدة في قسم الحلقات المضافة حديثاً
     يحتفظ بحد أقصى max_cards كارت ويحذف الأقدم
-    يلف الكروت في حاوية flex مع سكريبت لحساب الوقت النسبي
+    يلف الكروت في حاوية flex أفقية قابلة للتمرير مع سكريبت لحساب الوقت النسبي
     """
     if start_marker not in html_content or end_marker not in html_content:
         logger.error(f"Markers not found for recent episodes: {start_marker}")
@@ -1719,7 +1727,10 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
     
     # استخراج الكروت الموجودة فقط (بدون الحاوية والسكريبت القديم)
     soup = BeautifulSoup(section_content, 'html.parser')
-    existing_cards = soup.find_all('a', class_='episode-modern')
+    existing_cards = soup.find_all('a', class_='episode-card')
+    # fallback: دعم الكروت القديمة episode-modern أيضاً
+    if not existing_cards:
+        existing_cards = soup.find_all('a', class_='episode-modern')
     existing_cards_html = ''.join(str(c) for c in existing_cards)
     
     # إضافة الكارت الجديد في البداية
@@ -1727,7 +1738,7 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
     
     # حساب عدد الكاردات وحذف الزائد
     soup2 = BeautifulSoup(all_cards_html, 'html.parser')
-    cards = soup2.find_all('a', class_='episode-modern')
+    cards = soup2.find_all('a', class_='episode-card')
     if len(cards) > max_cards:
         for card in cards[max_cards:]:
             card.decompose()
@@ -1746,7 +1757,7 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
       else if(diff<3600){var m=Math.floor(diff/60);txt='تمت الإضافة منذ '+m+' دقيقة';}
       else if(diff<86400){var h=Math.floor(diff/3600);var rm=Math.floor((diff%3600)/1800);if(rm>=1)txt='تمت الإضافة منذ '+h+' ساعة ونصف';else txt='تمت الإضافة منذ '+h+' ساعة';}
       else{var d=Math.floor(diff/86400);txt='تمت الإضافة منذ '+d+' يوم';}
-      el.innerHTML='<span style="display:inline-block;width:6px;height:6px;background:#2196F3;border-radius:50%;vertical-align:middle;margin-left:4px;"></span>'+txt;
+      el.innerHTML='<span style="display:inline-block;width:6px;height:6px;background:#3b82f6;border-radius:50%;vertical-align:middle;margin-left:4px;"></span>'+txt;
     });
   }
   updateTimes();
@@ -1754,9 +1765,9 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
 })();
 </script>'''
     
-    # بناء القسم: حاوية flex + كروت + سكريبت
+    # بناء القسم: حاوية flex أفقية قابلة للتمرير + كروت + سكريبت
     wrapper = f'''
-<div style="display:flex;flex-wrap:wrap;gap:8px;padding:0 8px;overflow:hidden;clear:both;">
+<div style="display:flex;gap:12px;padding:0 8px;overflow-x:auto;scroll-snap-type:x mandatory;scrollbar-width:none;-webkit-overflow-scrolling:touch;">
 {cards_final}
 </div>
 {time_script}
