@@ -158,7 +158,7 @@ def determine_title_display(data: dict) -> Dict[str, str]:
             result["secondary"] = english_title
         return result
     
-    # 4) المحتوى الإنجليزي والغربي: يُكتب بلغة العمل الأصلية (إنجليزي/فرنسي/إسباني الخ)
+    # 4) المحتوى الإنجليزي والغربي: يُكتب بلغة العمل الأصلية (إنجليزي/فرنسي/إسبان�� الخ)
     if original_language in WESTERN_LANGUAGES or any(c in WESTERN_COUNTRIES for c in origin_country):
         result["primary"] = original_title  # اللغة الأصلية للعمل
         if english_title and english_title != original_title:
@@ -981,7 +981,7 @@ forwardBtn.addEventListener("click", (e) => {{
   resetControlsTimer();
 }});
 
-// جلب بيانات المسلسل
+// جلب بيانات ��لمسلسل
 Promise.all([
   fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}?api_key=${{API_KEY}}&language=en`).then(r => r.json()),
   fetch(`https://api.themoviedb.org/3/tv/${{SERIES_ID}}?api_key=${{API_KEY}}&language=ar`).then(r => r.json())
@@ -1744,7 +1744,7 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
             card.decompose()
     cards_final = str(soup2)
     
-    # سكريبت الوقت النسبي (يحدث النص تلقائياً)
+    # سكريبت الوقت النسبي (يحد�� النص تلقائياً)
     time_script = '''<script>
 (function(){
   function updateTimes(){
@@ -1753,7 +1753,7 @@ def insert_recent_episode_card(html_content: str, card_html: str, start_marker: 
       var now=Date.now();
       var diff=Math.floor((now-t)/1000);
       var txt='';
-      if(diff<60) txt='تمت الإضافة منذ لحظات';
+      if(diff<60) txt='تمت الإضافة منذ لحظا��';
       else if(diff<3600){var m=Math.floor(diff/60);txt='تمت الإضافة منذ '+m+' دقيقة';}
       else if(diff<86400){var h=Math.floor(diff/3600);var rm=Math.floor((diff%3600)/1800);if(rm>=1)txt='تمت الإضافة منذ '+h+' ساعة ونصف';else txt='تمت الإضافة منذ '+h+' ساعة';}
       else{var d=Math.floor(diff/86400);txt='تمت الإضافة منذ '+d+' يوم';}
@@ -2468,7 +2468,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status = series_data.get("status", "")
                 # استبعاد المسلسلات المنتهية صراحة
                 # Ended = انتهى، Canceled = ملغي
-                if status not in ["Ended", "Canceled", "Cancelled"]:
+                # إضافة فحص للحالات بلغات أخرى أيضاً
+                ended_statuses = ["Ended", "Canceled", "Cancelled", "ended", "canceled", "cancelled"]
+                if status not in ended_statuses:
                     # استخدام اللغة الأصلية للعرض
                     titles = determine_title_display(series_data)
                     display_name = titles.get("primary") or series_data.get("name", "بدون اسم")
