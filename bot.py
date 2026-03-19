@@ -2466,11 +2466,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if series_data:
                 # فلترة: فقط المسلسلات المستمرة (غير المنتهية)
                 status = series_data.get("status", "")
-                # Returning Series = مستمر، In Production = قيد الإنتاج
-                if status in ["Returning Series", "In Production", "Planned"]:
+                # استبعاد المسلسلات المنتهية صراحة
+                # Ended = انتهى، Canceled = ملغي
+                if status not in ["Ended", "Canceled", "Cancelled"]:
+                    # استخدام اللغة الأصلية للعرض
+                    titles = determine_title_display(series_data)
+                    display_name = titles.get("primary") or series_data.get("name", "بدون اسم")
                     enriched_list.append({
                         "id": s["id"],
-                        "name": series_data.get("name", "بدون اسم"),
+                        "name": display_name,
                         "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
                         "status": status
                     })
@@ -2527,9 +2531,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if series_data:
                 status = series_data.get("status", "")
                 status_ar = "مستمر" if status in ["Returning Series", "In Production"] else "منتهي"
+                # استخدام اللغة الأصلية للعرض
+                titles = determine_title_display(series_data)
+                display_name = titles.get("primary") or series_data.get("name", "بدون اسم")
                 enriched_list.append({
                     "id": s["id"],
-                    "name": series_data.get("name", "بدون اسم"),
+                    "name": display_name,
                     "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
                     "status_ar": status_ar
                 })
@@ -2614,9 +2621,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             info_text += f"S{s} E{e}: موجود\n"
         
         keyboard = [
-            ["اضافة حلقة جديدة", "اضافة موسم جديد"],
-            ["تعديل رابط حلقة", "حذف حلقة"],
-            ["رجوع"]
+            ["اضافة حلقة جديدة", "اضافة حلقات متعددة"],
+            ["اضافة موسم جديد", "تعديل رابط حلقة"],
+            ["حذف حلقة", "رجوع"]
         ]
         
         if poster:
@@ -2640,6 +2647,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if text == "اضافة حلقة جديدة":
             state["step"] = "ADD_EPISODE_SEASON"
+            user_states[uid] = state
+            await update.message.reply_text("ارسل رقم الموسم:", reply_markup=ReplyKeyboardRemove())
+            return
+        
+        if text == "اضافة حلقات متعددة":
+            state["step"] = "ADD_BULK_EPISODES_SEASON"
             user_states[uid] = state
             await update.message.reply_text("ارسل رقم الموسم:", reply_markup=ReplyKeyboardRemove())
             return
@@ -2720,12 +2733,95 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 recent_info = ""
                 if ok_recent:
                     recent_info = "\n✨ تمت الإضافة في قسم 'حلقات مضافة حديثاً' في الصفحة الرئيسية"
-                else:
-                    recent_info = "\n⚠️ فشل الإضافة في قسم 'حلقات مضافة حديثاً' (تحقق من وجود الـ markers)"
+                # لا نعرض رسالة الخطأ إذا فشل - فقط نتجاهل
                 
-                await update.message.reply_text(f"تمت اضافة الحلقة S{season} E{episode} بنجاح!{recent_info}")
+                await update.message.reply_text(f"✅ تمت اضافة الحلقة S{season} E{episode} بنجاح!{recent_info}")
             else:
-                await update.message.reply_text(f"تم�� اضافة الحلقة S{season} E{episode} بنجاح!")
+                await update.message.reply_text(f"✅ تمت اضافة الحلقة S{season} E{episode} بنجاح!")
+        else:
+            await update.message.reply_text("فشل في تحديث الملف.")
+        
+        user_states.pop(uid, None)
+        await show_main_menu(update)
+        return
+
+    # اضافة حلقات متعددة - الخطوة 1: رقم الموسم
+    if state.get("step") == "ADD_BULK_EPISODES_SEASON":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        state["bulk_season"] = int(text)
+        state["step"] = "ADD_BULK_EPISODES_START"
+        user_states[uid] = state
+        await update.message.reply_text("ارسل رقم الحلقة الأولى (البداية):")
+        return
+
+    # اضافة حلقات متعددة - الخطوة 2: رقم الحلقة الأولى
+    if state.get("step") == "ADD_BULK_EPISODES_START":
+        if not text.isdigit():
+            await update.message.reply_text("ارسل رقم صحيح")
+            return
+        state["bulk_start"] = int(text)
+        state["step"] = "ADD_BULK_EPISODES_LINKS"
+        user_states[uid] = state
+        season = state.get("bulk_season")
+        start_ep = state.get("bulk_start")
+        await update.message.reply_text(
+            f"الموسم {season} - بدءاً من الحلقة {start_ep}:\n\n"
+            f"ارسل روابط/Tokens الحلقات (كل سطر = حلقة واحدة بالترتيب):\n"
+            f"الحلقة {start_ep}: السطر الأول\n"
+            f"الحلقة {start_ep + 1}: السطر الثاني\n"
+            f"وهكذا..."
+        )
+        return
+
+    # اضافة حلقات متعددة - الخطوة 3: الروابط
+    if state.get("step") == "ADD_BULK_EPISODES_LINKS":
+        season = state.get("bulk_season")
+        start_ep = state.get("bulk_start")
+        tmdb_id = state.get("review_tmdb")
+        
+        # تقسيم الروابط حسب الأسطر
+        links = [link.strip() for link in text.strip().split('\n') if link.strip()]
+        
+        if len(links) == 0:
+            await update.message.reply_text("لم يتم إرسال أي روابط. حاول مرة أخرى.")
+            return
+        
+        # حفظ الروابط بدءاً من رقم الحلقة المحدد
+        new_links = {}
+        for i, link in enumerate(links):
+            episode_num = start_ep + i
+            episode_key = f"{season}-{episode_num}"
+            new_links[episode_key] = link
+        
+        await update.message.reply_text("جاري تحديث الملف...")
+        
+        ok = await update_series_episodes(tmdb_id, new_links)
+        
+        if ok:
+            # إضافة آخر حلقة في قسم "حلقات مضافة حديثاً"
+            series_data = state.get("review_series")
+            recent_info = ""
+            if series_data:
+                titles = determine_title_display(series_data)
+                if titles.get("secondary") == "FETCH_ARABIC":
+                    arabic_title = await fetch_arabic_title(tmdb_id, "tv")
+                    if arabic_title and arabic_title != titles["primary"]:
+                        titles["secondary"] = arabic_title
+                    else:
+                        titles["secondary"] = None
+                
+                # إضافة كارت لآخر حلقة مضافة
+                last_ep = start_ep + len(links) - 1
+                recent_card = build_recent_episode_card(series_data, tmdb_id, season, last_ep, titles)
+                ok_recent = await push_recent_episode_to_github(recent_card)
+                
+                if ok_recent:
+                    recent_info = "\n✨ تمت الإضافة في قسم 'حلقات مضافة حديثاً'"
+            
+            episodes_range = f"E{start_ep}-E{start_ep + len(links) - 1}" if len(links) > 1 else f"E{start_ep}"
+            await update.message.reply_text(f"✅ تمت اضافة {len(links)} حلقات S{season} {episodes_range} بنجاح!{recent_info}")
         else:
             await update.message.reply_text("فشل في تحديث الملف.")
         
@@ -2794,10 +2890,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 
                 if ok_recent:
                     recent_info = "\n✨ تمت الإضافة في قسم 'حلقات مضافة حديثاً'"
-                else:
-                    recent_info = "\n⚠️ فشل الإضافة في قسم 'حلقات مضافة حديثاً'"
+                # لا نعرض رسالة الخطأ إذا فشل
             
-            await update.message.reply_text(f"تمت اضافة الموسم {season} بنجاح! ({len(new_links)} حلقة){recent_info}")
+            await update.message.reply_text(f"✅ تمت اضافة الموسم {season} بنجاح! ({len(new_links)} حلقة){recent_info}")
         else:
             await update.message.reply_text("فشل في تحديث الملف.")
         
