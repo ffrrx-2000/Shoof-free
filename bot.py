@@ -23,6 +23,7 @@ BRANCH = "main"
 MAIN_FILE = "index.html"
 DISCOVER_FILE = "discover.html"
 SERIES_FOLDER = "series"  # مجلد ملفات المسلسلات
+REVIEW_LIST_FILE = "review_list.json"  # ملف قائمة المراجعة
 
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 ADMIN_ID = 5529978863
@@ -2075,6 +2076,64 @@ async def list_series_files() -> List[dict]:
             logger.exception("Error listing series files: %s", e)
             return []
 
+# ----------------------------- REVIEW LIST MANAGEMENT -----------------------------
+async def get_review_list() -> dict:
+    """جلب قائمة المراجعة من GitHub"""
+    async with aiohttp.ClientSession() as session:
+        data = await github_get_file(session, REVIEW_LIST_FILE)
+        if data:
+            try:
+                content = base64.b64decode(data.get("content", "")).decode("utf-8")
+                return json.loads(content)
+            except Exception as e:
+                logger.exception("Error parsing review list: %s", e)
+        return {"initialized": False, "series_ids": []}
+
+async def save_review_list(review_data: dict) -> bool:
+    """حفظ قائمة المراجعة في GitHub"""
+    async with aiohttp.ClientSession() as session:
+        # جلب SHA الحالي إن وجد
+        existing = await github_get_file(session, REVIEW_LIST_FILE)
+        sha = existing.get("sha") if existing else None
+        
+        content = json.dumps(review_data, ensure_ascii=False, indent=2)
+        content_b64 = base64.b64encode(content.encode("utf-8")).decode()
+        
+        res = await github_put_file(session, REVIEW_LIST_FILE, content_b64, sha, "Update review list")
+        return res is not None
+
+async def add_to_review_list(tmdb_id: str) -> bool:
+    """إضافة مسلسل لقائمة المراجعة"""
+    review_data = await get_review_list()
+    if tmdb_id not in review_data.get("series_ids", []):
+        review_data["series_ids"].append(tmdb_id)
+        return await save_review_list(review_data)
+    return True
+
+async def remove_from_review_list(tmdb_id: str) -> bool:
+    """إزالة مسلسل من قائمة المراجعة"""
+    review_data = await get_review_list()
+    if tmdb_id in review_data.get("series_ids", []):
+        review_data["series_ids"].remove(tmdb_id)
+        return await save_review_list(review_data)
+    return True
+
+async def is_review_initialized() -> bool:
+    """التحقق هل تم إعداد قائمة المراجعة من قبل"""
+    review_data = await get_review_list()
+    return review_data.get("initialized", False)
+
+async def mark_review_initialized() -> bool:
+    """تعليم قائمة المراجعة كمُعدّة"""
+    review_data = await get_review_list()
+    review_data["initialized"] = True
+    return await save_review_list(review_data)
+
+async def get_review_series_ids() -> List[str]:
+    """جلب قائمة IDs المسلسلات في المراجعة"""
+    review_data = await get_review_list()
+    return review_data.get("series_ids", [])
+
 # ----------------------------- TELEGRAM HANDLERS -----------------------------
 MAIN_KEYBOARD = [["اضافة فيلم", "اضافة مسلسل"], ["مراجعة المسلسلات", "تعديل المسلسلات"], ["حذف كارت"]]
 
@@ -2437,52 +2496,142 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"عدد الحلقات المضافة: {len(episode_links)}\n"
                 f"الرابط: series/{tmdb_id}.html\n\n"
                 f"تم إضافة الكارت في:\n"
-                f"- الإضاف��ت الأخيرة: {'نعم' if ok_latest else 'لا'}\n"
+                f"- الإضافات الأخيرة: {'نعم' if ok_latest else 'لا'}\n"
                 f"- قسم المسلسلات: {'نعم' if ok_series else 'لا'}\n"
                 f"- صفحة اكتشف: {'نعم' if ok_disc else 'لا'}"
             )
+            
+            # سؤال المستخدم إذا كان يريد إضافة المسلسل لقائمة المراجعة
+            is_initialized = await is_review_initialized()
+            if is_initialized:
+                state["new_series_tmdb"] = tmdb_id
+                state["new_series_name"] = title_display
+                state["step"] = "ASK_ADD_TO_REVIEW"
+                user_states[uid] = state
+                
+                keyboard = [["نعم، اضفه للمراجعة", "لا، شكراً"]]
+                await update.message.reply_text(
+                    "هل تريد إضافة هذا المسلسل لقائمة المراجعة؟\n(لمتابعة الحلقات الجديدة)",
+                    reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+                )
+                return
         else:
             await update.message.reply_text("فشل في بعض العمليات. تحقق من السجلات.")
         
         user_states.pop(uid, None)
         await show_main_menu(update)
         return
+    
+    # ===== معالجة سؤال إضافة المسلسل لقائمة المراجعة =====
+    if state.get("step") == "ASK_ADD_TO_REVIEW":
+        tmdb_id = state.get("new_series_tmdb")
+        series_name = state.get("new_series_name")
+        
+        if text == "نعم، اضفه للمراجعة":
+            ok = await add_to_review_list(tmdb_id)
+            if ok:
+                await update.message.reply_text(f"تمت إضافة '{series_name}' لقائمة المراجعة بنجاح!")
+            else:
+                await update.message.reply_text("حدث خطأ أثناء الإضافة لقائمة المراجعة.")
+        else:
+            await update.message.reply_text("تم تخطي الإضافة لقائمة المراجعة.")
+        
+        user_states.pop(uid, None)
+        await show_main_menu(update)
+        return
 
-    # ===== مراجعة المسلسلات (المستمرة فقط) =====
+    # ===== مراجعة المسلسلات =====
     if text == "مراجعة المسلسلات":
-        await update.message.reply_text("جاري جلب قائمة المسلسلات المستمرة...")
+        # التحقق هل تم إعداد قائمة المراجعة من قبل
+        is_initialized = await is_review_initialized()
         
-        series_list = await list_series_files()
-        
-        if not series_list:
-            await update.message.reply_text("لا توجد مسلسلات مضافة حاليًا.")
-            await show_main_menu(update)
-            return
-        
-        # جلب معلومات كل مسلسل من TMDB وفلترة المستمرة فقط
-        enriched_list = []
-        for s in series_list[:20]:  # حد أقصى 20
-            series_data = await get_series(s["id"])
-            if series_data:
-                # فلترة: فقط المسلسلات المستمرة (غير المنتهية)
-                status = series_data.get("status", "")
-                # استبعاد المسلسلات المنتهية صراحة
-                # Ended = انتهى، Canceled = ملغي
-                # إضافة فحص للحالات بلغات أخرى أيضاً
-                ended_statuses = ["Ended", "Canceled", "Cancelled", "ended", "canceled", "cancelled"]
-                if status not in ended_statuses:
-                    # استخدام اللغة الأصلية للعرض
+        if not is_initialized:
+            # أول مرة: عرض كل المسلسلات للاختيار
+            await update.message.reply_text("مرحباً! هذه أول مرة تفتح قسم المراجعة.\nجاري جلب كل المسلسلات لاختيار ما تريد متابعته...")
+            
+            series_list = await list_series_files()
+            
+            if not series_list:
+                await update.message.reply_text("لا توجد مسلسلات مضافة حاليًا.")
+                await show_main_menu(update)
+                return
+            
+            # جلب معلومات كل مسلسل من TMDB
+            enriched_list = []
+            for s in series_list[:30]:  # حد أقصى 30
+                series_data = await get_series(s["id"])
+                if series_data:
                     titles = determine_title_display(series_data)
                     display_name = titles.get("primary") or series_data.get("name", "بدون اسم")
+                    status = series_data.get("status", "")
+                    ended_statuses = ["Ended", "Canceled", "Cancelled"]
+                    status_ar = "منتهي" if status in ended_statuses else "مستمر"
                     enriched_list.append({
                         "id": s["id"],
                         "name": display_name,
                         "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
-                        "status": status
+                        "status_ar": status_ar
                     })
+            
+            if not enriched_list:
+                await update.message.reply_text("لا توجد مسلسلات.")
+                await show_main_menu(update)
+                return
+            
+            state["all_series_list"] = enriched_list
+            state["selected_for_review"] = []
+            state["current_index"] = 0
+            state["step"] = "INITIAL_REVIEW_SETUP"
+            user_states[uid] = state
+            
+            # عرض أول مسلسل
+            current = enriched_list[0]
+            keyboard = [["اضافة للمراجعة", "تخطي"], ["انهاء الاختيار"]]
+            
+            msg_text = f"1/{len(enriched_list)}\n\n{current['name']}\nID: {current['id']}\nالحالة: {current['status_ar']}"
+            
+            if current['poster']:
+                await update.message.reply_photo(
+                    photo=current['poster'],
+                    caption=msg_text,
+                    reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+                )
+            else:
+                await update.message.reply_text(
+                    msg_text,
+                    reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+                )
+            return
+        
+        # ليست أول مرة: عرض فقط المسلسلات المختارة للمراجعة
+        await update.message.reply_text("جاري جلب قائمة مسلسلات المراجعة...")
+        
+        review_ids = await get_review_series_ids()
+        
+        if not review_ids:
+            await update.message.reply_text("لا توجد مسلسلات في قائمة المراجعة.\nيمكنك إضافة مسلسلات من خلال زر 'اضافة مسلسل' أو 'تعديل المسلسلات'.")
+            await show_main_menu(update)
+            return
+        
+        # جلب معلومات المسلسلات المختارة فقط
+        enriched_list = []
+        for tmdb_id in review_ids[:20]:
+            series_data = await get_series(tmdb_id)
+            if series_data:
+                titles = determine_title_display(series_data)
+                display_name = titles.get("primary") or series_data.get("name", "بدون اسم")
+                status = series_data.get("status", "")
+                ended_statuses = ["Ended", "Canceled", "Cancelled"]
+                status_ar = "منتهي" if status in ended_statuses else "مستمر"
+                enriched_list.append({
+                    "id": tmdb_id,
+                    "name": display_name,
+                    "poster": f"https://image.tmdb.org/t/p/w500{series_data.get('poster_path')}" if series_data.get('poster_path') else None,
+                    "status_ar": status_ar
+                })
         
         if not enriched_list:
-            await update.message.reply_text("لا توجد مسلسلات مستمرة تحتاج مراجعة.\nجميع المسلسلات المضافة منتهية.")
+            await update.message.reply_text("لا توجد مسلسلات في قائمة المراجعة.")
             await show_main_menu(update)
             return
         
@@ -2497,10 +2646,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if s['poster']:
                     await update.message.reply_photo(
                         photo=s['poster'],
-                        caption=f"{s['name']}\nID: {s['id']}\nالحالة: مستمر"
+                        caption=f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}"
                     )
                 else:
-                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}\nالحالة: مستمر")
+                    await update.message.reply_text(f"{s['name']}\nID: {s['id']}\nالحالة: {s['status_ar']}")
             except Exception as e:
                 await update.message.reply_text(f"{s['name']}\nID: {s['id']}")
             
@@ -2510,9 +2659,78 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard.append(["رجوع"])
         
         await update.message.reply_text(
-            "اختر المسلسل المستمر لمراجعته:",
+            "اختر المسلسل لمراجعته:",
             reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         )
+        return
+    
+    # ===== معالجة الإعداد الأولي لقائمة المراجعة =====
+    if state.get("step") == "INITIAL_REVIEW_SETUP":
+        all_series = state.get("all_series_list", [])
+        current_index = state.get("current_index", 0)
+        selected = state.get("selected_for_review", [])
+        
+        if text == "اضافة للمراجعة":
+            # إضافة المسلسل الحالي للقائمة
+            current = all_series[current_index]
+            selected.append(current["id"])
+            state["selected_for_review"] = selected
+        
+        if text == "انهاء الاختيار":
+            # حفظ القائمة وإنهاء الإعداد
+            await update.message.reply_text("جاري حفظ قائمة المراجعة...")
+            
+            review_data = {"initialized": True, "series_ids": selected}
+            ok = await save_review_list(review_data)
+            
+            if ok:
+                await update.message.reply_text(f"تم حفظ قائمة المراجعة بنجاح!\nعدد المسلسلات المختارة: {len(selected)}")
+            else:
+                await update.message.reply_text("حدث خطأ أثناء الحفظ، لكن سيتم المتابعة.")
+            
+            user_states.pop(uid, None)
+            await show_main_menu(update)
+            return
+        
+        # الانتقال للمسلسل التالي
+        next_index = current_index + 1
+        
+        if next_index >= len(all_series):
+            # انتهت القائمة، حفظ وإنهاء
+            await update.message.reply_text("انتهت قائمة المسلسلات.\nجاري حفظ اختياراتك...")
+            
+            review_data = {"initialized": True, "series_ids": selected}
+            ok = await save_review_list(review_data)
+            
+            if ok:
+                await update.message.reply_text(f"تم حفظ قائمة المراجعة بنجاح!\nعدد المسلسلات المختارة: {len(selected)}")
+            else:
+                await update.message.reply_text("حدث خطأ أثناء الحفظ.")
+            
+            user_states.pop(uid, None)
+            await show_main_menu(update)
+            return
+        
+        state["current_index"] = next_index
+        user_states[uid] = state
+        
+        # عرض المسلسل التالي
+        current = all_series[next_index]
+        keyboard = [["اضافة للمراجعة", "تخطي"], ["انهاء الاختيار"]]
+        
+        msg_text = f"{next_index + 1}/{len(all_series)}\n\n{current['name']}\nID: {current['id']}\nالحالة: {current['status_ar']}"
+        
+        if current['poster']:
+            await update.message.reply_photo(
+                photo=current['poster'],
+                caption=msg_text,
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
+        else:
+            await update.message.reply_text(
+                msg_text,
+                reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+            )
         return
 
     # ===== تعديل المسلسلات (جميع المسلسلات) =====
@@ -2611,9 +2829,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         poster = f"https://image.tmdb.org/t/p/w500{series.get('poster_path')}" if series.get('poster_path') else None
         
+        # التحقق هل المسلسل في قائمة المراجعة
+        review_ids = await get_review_series_ids()
+        is_in_review = tmdb_id in review_ids
+        
         info_text = (
             f"المسلسل: {series.get('name')}\n"
             f"TMDB ID: {tmdb_id}\n"
+            f"في قائمة المراجعة: {'نعم' if is_in_review else 'لا'}\n"
             f"عدد الحلقات المضافة: {len(current_links)}\n\n"
             f"الحلقات الموجودة:\n"
         )
@@ -2622,10 +2845,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s, e = key.split('-')
             info_text += f"S{s} E{e}: موجود\n"
         
+        # زر إضافة/إزالة من قائمة المراجعة
+        review_btn = "إزالة من المراجعة" if is_in_review else "إضافة للمراجعة"
+        
         keyboard = [
             ["اضافة حلقة جديدة", "اضافة حلقات متعددة"],
             ["اضافة موسم جديد", "تعديل رابط حلقة"],
-            ["حذف حلقة", "رجوع"]
+            ["حذف حلقة", review_btn],
+            ["رجوع"]
         ]
         
         if poster:
@@ -2681,6 +2908,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "ارسل مفتاح الحلقة للحذف (مثال: 1-5):",
                 reply_markup=ReplyKeyboardRemove()
             )
+            return
+        
+        if text == "إضافة للمراجعة":
+            tmdb_id = state.get("review_tmdb")
+            ok = await add_to_review_list(tmdb_id)
+            if ok:
+                await update.message.reply_text("تمت إضافة المسلسل لقائمة المراجعة بنجاح!")
+            else:
+                await update.message.reply_text("حدث خطأ أثناء الإضافة.")
+            user_states.pop(uid, None)
+            await show_main_menu(update)
+            return
+        
+        if text == "إزالة من المراجعة":
+            tmdb_id = state.get("review_tmdb")
+            ok = await remove_from_review_list(tmdb_id)
+            if ok:
+                await update.message.reply_text("تمت إزالة المسلسل من قائمة المراجعة!")
+            else:
+                await update.message.reply_text("حدث خطأ أثناء الإزالة.")
+            user_states.pop(uid, None)
+            await show_main_menu(update)
             return
 
     # اضافة حلقة جديدة
